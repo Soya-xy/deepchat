@@ -5,27 +5,34 @@ leaves `pnpm typecheck` and the session/tape suites green on its own.
 
 ## Slice 1: Make idempotent message appends observable
 
-- [ ] In `factPersistence.ts` `appendMessageRecordToTape`, compare the returned row's
+- [x] In `factPersistence.ts` `appendMessageRecordToTape`, compare the returned row's
       `payload.record` with the record when the provenance key was derived; warn once with session
       id, message id, source and differing field names (`content`, `status`, `orderSeq`,
       `metadata`). Skip the comparison when the stored `payload_json` equals the serialized payload.
-- [ ] Guard test: identical re-append logs nothing; a re-append with different content logs one
+- [x] Guard test: identical re-append logs nothing; a re-append with different content logs one
       warning naming `content`.
 
 Completion: the warning exists and fires only on divergence. No behavior change for callers.
 
-## Slice 2: Canonical record and the applier as the single terminal writer
+## Slice 2a: Canonical record on shared table mappings
 
-- [ ] Extract the persist and read field mappings for user files and assistant blocks into pure
-      functions in `src/main/session/data/messageContent.ts`, used by both the tables' write path
-      and `toMessageFile` / `toAssistantBlock`.
-- [ ] Add `canonicalizeMessageContent(role, rawContent, updatedAt)` on top of those mappings.
+- [x] Move the persist and read field mappings for user files and assistant blocks into
+      `src/main/session/data/messageContent.ts`; `deepchat_assistant_blocks.replaceForMessage`,
+      `persistUserContent` and `materializeContent` use them.
+- [x] Add `canonicalizeMessageContent(role, rawContent, updatedAt)` on top of those mappings.
+- [x] Round-trip guard test against real SQLite: the canonical string equals what the tables return
+      after persisting the raw content, for user content with files, links, active skills and inline
+      items, and for assistant blocks covering reasoning, tool call, image, action and error shapes
+      including a block without a timestamp. The test runs in the native Tape storage CI step.
+
+Completion: one mapping per direction; the canonical form is pinned to the tables' behavior.
+
+## Slice 2b: The applier as the single terminal writer
+
 - [ ] Add `TranscriptProjectionApplier` (`transcriptProjection.ts`) with `applyRecord` and
       `applyRetraction`; move the table-writing bodies of the terminal methods into it.
 - [ ] Route every terminal method in `SessionTranscript` through the applier while keeping the
       current order (tables, read back, fact). Behavior is unchanged in this slice.
-- [ ] Round-trip guard test: `materialize(persist(canonical)) === canonical` for user content with
-      files, links, active skills, inline items, and for each persisted assistant block type.
 
 Completion: `SessionTranscript` no longer writes terminal rows directly; all existing tests pass.
 

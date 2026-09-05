@@ -86,7 +86,9 @@ same instant within the same transaction.
 Invariant: for every record `r` produced by the canonicalizer,
 `materialize(persist(r)) === r.content`. A guard test pins this for user content with files, links,
 active skills and inline items, and for assistant content covering every block type the renderer
-persists. Any new persisted field must be added to both mappings or the guard fails.
+persists. Any new persisted field must be added to both mappings or the guard fails. Fields the
+tables do not persist today (`artifact`, the `maximum_tool_calls_reached` action type) are dropped
+by the canonical form exactly as the read path drops them; the fact carries what the UI can show.
 
 ### TranscriptProjectionApplier
 

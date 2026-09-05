@@ -3,7 +3,6 @@ import type { SessionDatabase } from './database'
 import type {
   ChatMessagePageResult,
   ChatMessageRecord,
-  MessageFile,
   MessageMetadata,
   MessagePageCursor,
   MessageTraceRecord,
@@ -33,12 +32,15 @@ import type {
   TapeMessageFactWriter
 } from '@/tape/ports/capabilities'
 import type { TapeCompactionModelCallInput } from '@/tape/domain/compactionUsage'
+import { getAttachmentSearchableText } from '@shared/utils/attachmentRepresentation'
 import {
-  getAttachmentSearchableText,
-  normalizeAttachmentRepresentationPreference,
-  normalizeAttachmentResolvedRepresentation,
-  normalizePdfEmbeddedTextCoverage
-} from '@shared/utils/attachmentRepresentation'
+  assembleUserContent,
+  parseAssistantBlocks,
+  parseUserContent,
+  toAssistantBlock,
+  toMessageFile,
+  toUserMessageFileRowInput
+} from './messageContent'
 
 const MAX_SEARCHABLE_ATTACHMENT_CHARACTERS = 32_000
 const SEARCH_ATTACHMENT_TRUNCATION_MARKER = '[Attachment search text truncated]'
@@ -118,20 +120,6 @@ type StructuredMessageMaps = {
   fileRows: Map<string, DeepChatUserMessageFileRow[]>
   linkRows: Map<string, DeepChatUserMessageLinkRow[]>
   assistantRows: Map<string, DeepChatAssistantBlockRow[]>
-}
-
-function normalizePersistedActionType(
-  actionType: string | null
-): AssistantMessageBlock['action_type'] | undefined {
-  if (
-    actionType === 'tool_call_permission' ||
-    actionType === 'question_request' ||
-    actionType === 'rate_limit'
-  ) {
-    return actionType
-  }
-
-  return undefined
 }
 
 function extractSearchableMessageContent(rawContent: string): string {
@@ -648,7 +636,7 @@ export class SessionTranscript {
     }
 
     if (row.role === 'user') {
-      const parsed = this.parseUserContent(content)
+      const parsed = parseUserContent(content)
       if (parsed) {
         this.persistUserContent(messageId, parsed)
         this.upsertMessageSearchDocument(row.session_id, messageId, 'user', content, row.updated_at)
@@ -663,7 +651,7 @@ export class SessionTranscript {
       return
     }
 
-    const blocks = this.parseAssistantBlocks(content)
+    const blocks = parseAssistantBlocks(content)
     this.database.deepchatAssistantBlocksTable.replaceForMessage(messageId, blocks)
     if (row.status === 'sent' || row.status === 'error') {
       this.upsertMessageSearchDocument(
@@ -873,14 +861,14 @@ export class SessionTranscript {
         metadata: record.metadata
       })
       if (record.role === 'user') {
-        const userContent = this.parseUserContent(record.content)
+        const userContent = parseUserContent(record.content)
         if (userContent) {
           this.persistUserContent(nextId, userContent)
         }
       } else {
         this.database.deepchatAssistantBlocksTable.replaceForMessage(
           nextId,
-          this.parseAssistantBlocks(record.content)
+          parseAssistantBlocks(record.content)
         )
       }
       this.upsertMessageSearchDocument(
@@ -910,9 +898,7 @@ export class SessionTranscript {
         continue
       }
       if (row.role === 'assistant') {
-        const blocks = this.parseAssistantBlocks(
-          recoveredRecords.get(row.id)?.content ?? row.content
-        )
+        const blocks = parseAssistantBlocks(recoveredRecords.get(row.id)?.content ?? row.content)
         const recoveredBlocks = buildTerminalErrorBlocks(blocks, 'common.error.sessionInterrupted')
         this.database.deepchatAssistantBlocksTable.replaceForMessage(row.id, recoveredBlocks)
         this.database.deepchatMessagesTable.updateContentAndStatus(
@@ -978,14 +964,14 @@ export class SessionTranscript {
 
   backfillMessageRow(row: DeepChatMessageRow): void {
     if (row.role === 'user') {
-      const content = this.parseUserContent(row.content)
+      const content = parseUserContent(row.content)
       if (content) {
         this.persistUserContent(row.id, content)
       }
     } else {
       this.database.deepchatAssistantBlocksTable.replaceForMessage(
         row.id,
-        this.parseAssistantBlocks(row.content)
+        parseAssistantBlocks(row.content)
       )
     }
 
@@ -1004,7 +990,7 @@ export class SessionTranscript {
     if (row.role === 'user') {
       return parseMessageMetadata(row.metadata).inputReceipt?.mode === 'steer'
     }
-    const blocks = this.parseAssistantBlocks(this.materializeContent(row))
+    const blocks = parseAssistantBlocks(this.materializeContent(row))
     return blocks.some(
       (block) =>
         block.type === 'action' &&
@@ -1063,18 +1049,16 @@ export class SessionTranscript {
         ? (maps.linkRows.get(row.id) ?? [])
         : this.database.deepchatUserMessageLinksTable.listByMessageIds([row.id])
 
-      const rawUserContent = this.parseUserContent(row.content)
-      const activeSkills = rawUserContent?.activeSkills ?? []
-      const inlineItems = rawUserContent?.inlineItems ?? []
-      return JSON.stringify({
+      const rawUserContent = parseUserContent(row.content)
+      return assembleUserContent({
         text: userRow.text,
-        files: fileRows.map((fileRow) => this.toMessageFile(fileRow)),
+        files: fileRows.map((fileRow) => toMessageFile(fileRow)),
         links: linkRows.map((linkRow) => linkRow.url),
         search: userRow.search_enabled === 1,
         think: userRow.think_enabled === 1,
-        ...(activeSkills.length > 0 ? { activeSkills } : {}),
-        ...(inlineItems.length > 0 ? { inlineItems } : {})
-      } satisfies UserMessageContent)
+        activeSkills: rawUserContent?.activeSkills ?? [],
+        inlineItems: rawUserContent?.inlineItems ?? []
+      })
     }
 
     const assistantRows = maps
@@ -1084,54 +1068,7 @@ export class SessionTranscript {
       return row.content
     }
 
-    return JSON.stringify(assistantRows.map((blockRow) => this.toAssistantBlock(blockRow)))
-  }
-
-  private parseAssistantBlocks(rawContent: string): AssistantMessageBlock[] {
-    try {
-      const parsed = JSON.parse(rawContent) as AssistantMessageBlock[]
-      return Array.isArray(parsed) ? parsed : []
-    } catch {
-      return []
-    }
-  }
-
-  private parseUserContent(rawContent: string): UserMessageContent | null {
-    try {
-      const parsed = JSON.parse(rawContent) as Partial<UserMessageContent>
-      if (!parsed || typeof parsed !== 'object') {
-        return null
-      }
-
-      return {
-        text: typeof parsed.text === 'string' ? parsed.text : '',
-        files: Array.isArray(parsed.files) ? (parsed.files.filter(Boolean) as MessageFile[]) : [],
-        links: Array.isArray(parsed.links)
-          ? parsed.links.filter((item): item is string => typeof item === 'string')
-          : [],
-        search: parsed.search === true,
-        think: parsed.think === true,
-        activeSkills: this.normalizeActiveSkills(parsed.activeSkills),
-        inlineItems: Array.isArray(parsed.inlineItems) ? parsed.inlineItems : []
-      }
-    } catch {
-      return null
-    }
-  }
-
-  private normalizeActiveSkills(activeSkills?: string[]): string[] {
-    if (!Array.isArray(activeSkills)) {
-      return []
-    }
-
-    return Array.from(
-      new Set(
-        activeSkills
-          .filter((item): item is string => typeof item === 'string')
-          .map((item) => item.trim())
-          .filter(Boolean)
-      )
-    )
+    return JSON.stringify(assistantRows.map((blockRow) => toAssistantBlock(blockRow)))
   }
 
   private buildCompactionBlocks(status: 'compacting' | 'compacted'): AssistantMessageBlock[] {
@@ -1172,111 +1109,9 @@ export class SessionTranscript {
     })
     this.database.deepchatUserMessageFilesTable.replaceForMessage(
       messageId,
-      content.files.map((file) => ({
-        name: file.name,
-        path: file.path,
-        mimeType: file.mimeType ?? file.type,
-        size: file.size,
-        metadataJson: JSON.stringify({
-          type: file.type,
-          content: file.content,
-          token: file.token,
-          thumbnail: file.thumbnail,
-          metadata: file.metadata,
-          requestedRepresentation: normalizeAttachmentRepresentationPreference(
-            file.requestedRepresentation
-          ),
-          pdfTextCoverage: normalizePdfEmbeddedTextCoverage(file.pdfTextCoverage),
-          resolvedRepresentation: normalizeAttachmentResolvedRepresentation(
-            file.resolvedRepresentation
-          )
-        })
-      }))
+      content.files.map((file) => toUserMessageFileRowInput(file))
     )
     this.database.deepchatUserMessageLinksTable.replaceForMessage(messageId, content.links)
-  }
-
-  private toMessageFile(row: DeepChatUserMessageFileRow): MessageFile {
-    const extra = this.parseJson<Record<string, unknown>>(row.metadata_json, {})
-    return {
-      name: row.name ?? '',
-      path: row.path,
-      type: typeof extra.type === 'string' ? extra.type : (row.mime_type ?? undefined),
-      size: row.size ?? undefined,
-      content: typeof extra.content === 'string' ? extra.content : undefined,
-      mimeType: row.mime_type ?? undefined,
-      token: typeof extra.token === 'number' ? extra.token : undefined,
-      thumbnail: typeof extra.thumbnail === 'string' ? extra.thumbnail : undefined,
-      requestedRepresentation: normalizeAttachmentRepresentationPreference(
-        extra.requestedRepresentation
-      ),
-      pdfTextCoverage: normalizePdfEmbeddedTextCoverage(extra.pdfTextCoverage),
-      resolvedRepresentation: normalizeAttachmentResolvedRepresentation(
-        extra.resolvedRepresentation
-      ),
-      metadata:
-        extra.metadata && typeof extra.metadata === 'object' && !Array.isArray(extra.metadata)
-          ? (extra.metadata as MessageFile['metadata'])
-          : undefined
-    }
-  }
-
-  private toAssistantBlock(row: DeepChatAssistantBlockRow): AssistantMessageBlock {
-    const extra = this.parseJson<{
-      id?: string
-      timestamp?: number
-      imageData?: string
-      extra?: AssistantMessageBlock['extra']
-      toolCallExtra?: Record<string, unknown>
-      reasoningTime?: number
-    }>(row.extra_json, {})
-
-    const toolCall =
-      row.tool_call_id ||
-      row.tool_name ||
-      row.tool_params ||
-      row.tool_response ||
-      extra.toolCallExtra
-        ? {
-            ...extra.toolCallExtra,
-            id: row.tool_call_id ?? undefined,
-            name: row.tool_name ?? undefined,
-            params: row.tool_params ?? undefined,
-            response: row.tool_response ?? undefined
-          }
-        : undefined
-
-    const reasoningTime =
-      typeof extra.reasoningTime === 'number'
-        ? extra.reasoningTime
-        : row.reasoning_start_at !== null && row.reasoning_end_at !== null
-          ? {
-              start: row.reasoning_start_at,
-              end: row.reasoning_end_at
-            }
-          : undefined
-
-    const imageData = extra.imageData?.trim()
-    const actionType = normalizePersistedActionType(row.action_type)
-
-    return {
-      id: extra.id,
-      type: row.block_type as AssistantMessageBlock['type'],
-      content: row.text_content ?? undefined,
-      status: row.status as AssistantMessageBlock['status'],
-      timestamp: extra.timestamp ?? row.updated_at,
-      reasoning_time: reasoningTime,
-      image_data:
-        imageData && row.image_mime_type
-          ? {
-              data: imageData,
-              mimeType: row.image_mime_type
-            }
-          : undefined,
-      tool_call: toolCall as AssistantMessageBlock['tool_call'],
-      extra: extra.extra,
-      ...(actionType ? { action_type: actionType } : {})
-    }
   }
 
   private loadStructuredMaps(messageIds: string[]): StructuredMessageMaps {
@@ -1339,18 +1174,6 @@ export class SessionTranscript {
       content: extractSearchableMessageContent(rawContent),
       updatedAt
     })
-  }
-
-  private parseJson<T>(raw: string | null | undefined, fallback: T): T {
-    if (!raw) {
-      return fallback
-    }
-
-    try {
-      return JSON.parse(raw) as T
-    } catch {
-      return fallback
-    }
   }
 
   private persistUsageStats(
