@@ -1,8 +1,9 @@
+import { beforeEach, vi } from 'vitest'
+import logger from '@shared/logger'
 import {
   describe,
   expect,
   it,
-  vi,
   buildContext,
   toAppSessionId,
   SessionTape,
@@ -18,6 +19,15 @@ import {
   buildTapeToolResultPayloadHash
 } from '@/tape/domain/toolSurfaceFacts'
 import { TOOL_SEARCH_AGENT_TOOL_NAME } from '@shared/agentTools'
+
+vi.mock('@shared/logger', () => ({
+  default: {
+    error: vi.fn(),
+    warn: vi.fn(),
+    info: vi.fn(),
+    debug: vi.fn()
+  }
+}))
 
 describe('SessionTape reconciliation and facts', () => {
   it('uses the explicit replacement revision kind instead of the reason text', () => {
@@ -97,6 +107,59 @@ describe('SessionTape reconciliation and facts', () => {
     expect(entries.filter((entry) => entry.kind === 'tool_call')).toHaveLength(1)
     expect(entries.filter((entry) => entry.kind === 'tool_result')).toHaveLength(1)
     expect(entries.filter((entry) => entry.name === 'migration/backfill')).toHaveLength(1)
+  })
+
+  describe('sent message fact re-append', () => {
+    beforeEach(() => {
+      vi.mocked(logger.warn).mockClear()
+    })
+
+    it('stays silent while the existing entry carries the same record', () => {
+      const { table, entries } = createTapeTableMock()
+      const record = createRecord({ id: 'u1', orderSeq: 1 })
+
+      appendMessageRecordToTape(table as any, record, 'live')
+      appendMessageRecordToTape(table as any, { ...record, traceCount: 3 }, 'backfill')
+
+      expect(entries.filter((entry) => entry.kind === 'message')).toHaveLength(1)
+      expect(logger.warn).not.toHaveBeenCalled()
+    })
+
+    it('warns once and names the field when the existing entry holds a different record', () => {
+      const { table, entries } = createTapeTableMock()
+      const record = createRecord({ id: 'u1', orderSeq: 1 })
+
+      appendMessageRecordToTape(table as any, record, 'live')
+      appendMessageRecordToTape(
+        table as any,
+        {
+          ...record,
+          content: JSON.stringify({
+            text: 'edited without a replacement fact',
+            files: [],
+            links: [],
+            search: false,
+            think: false
+          }),
+          updatedAt: 200
+        },
+        'live'
+      )
+
+      expect(entries.filter((entry) => entry.kind === 'message')).toHaveLength(1)
+      expect(logger.warn).toHaveBeenCalledTimes(1)
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('different record'),
+        expect.objectContaining({
+          sessionId: 's1',
+          messageId: 'u1',
+          entryId: entries.find((entry) => entry.kind === 'message')?.entry_id,
+          source: 'live',
+          fields: ['content']
+        })
+      )
+      expect(vi.mocked(logger.warn).mock.calls[0]?.[1]).not.toHaveProperty('content')
+    })
   })
 
   describe('backfill short-circuit', () => {

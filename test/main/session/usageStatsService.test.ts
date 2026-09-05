@@ -468,7 +468,29 @@ function createMockSqlitePresenter() {
     },
     deepchatTapeEntriesTable: {
       ensureBootstrapAnchor: vi.fn(),
-      append: vi.fn(),
+      // The store contract returns the appended row; the fact writer reads its payload back.
+      append: vi.fn(
+        (input: {
+          sessionId: string
+          kind: DeepChatTapeEntryRow['kind']
+          name?: string | null
+          provenanceKey?: string | null
+          payload?: Record<string, unknown>
+          createdAt?: number
+        }): DeepChatTapeEntryRow => ({
+          session_id: input.sessionId,
+          entry_id: tapeEntries.length + 1,
+          kind: input.kind,
+          name: input.name ?? null,
+          source_type: null,
+          source_id: null,
+          source_seq: null,
+          provenance_key: input.provenanceKey ?? null,
+          payload_json: JSON.stringify(input.payload ?? {}),
+          meta_json: '{}',
+          created_at: input.createdAt ?? 0
+        })
+      ),
       listEventsByNamePage(
         name: string,
         cursor: { sessionId: string; entryId: number } | null,
