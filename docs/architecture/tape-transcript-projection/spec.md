@@ -104,14 +104,14 @@ transcript tables.
   again on fork, import, recovery and replay without a call having happened. The assistant
   terminal writes (`finalizeAssistantMessage`, `setMessageError` with metadata) record usage
   themselves, as the pending-region metadata update already does.
-- `applyRetraction(messageId)`: delete the eight message-scoped rows exactly as
+- `applyRetractions(messageIds)`: delete the eight message-scoped rows exactly as
   `deleteMessageWithReason` does today, including the two sidecars.
-- `replay(sessionId, afterEntryId)`: read effective message input rows with `entry_id >
-  afterEntryId`, apply message facts in entry order via `applyRecord(payload.record)`, and apply
-  `message/retracted` events via `applyRetraction`. It never deletes a transcript row that Tape has
-  not retracted and never touches a `pending` row that has no fact. `message/compaction_indicator`
-  events are skipped; compaction marker recovery stays with `reconcileCompactionMessages`, which
-  already decides marker state from the reconstruction anchor.
+- `applyTapeEntries(rows)`: the reconciler reads the effective message input rows with `entry_id`
+  past the cursor and hands them over in entry order; message facts go through
+  `applyRecord(payload.record)` and `message/retracted` events through `applyRetractions`. It never
+  deletes a transcript row that Tape has not retracted and never touches a `pending` row that has
+  no fact. `message/compaction_indicator` events are skipped; compaction marker recovery stays with
+  `reconcileCompactionMessages`, which already decides marker state from the reconstruction anchor.
 
 ### Write direction for terminal state
 
@@ -128,7 +128,7 @@ fact append disappears.
 | compaction shift (`shiftMessagesFrom`) | per-message `appendMessageReplacement('order')` | none: one `incrementOrderSeqFrom` UPDATE stamped with the facts' `updatedAt`; content is unchanged so re-materializing N rows would only add writes |
 | `markSteerMessagesRead`, `settleSteerMessages`, `failPendingSteerMessages` | `appendMessageReplacement('record')` | `applyRecord` |
 | `updateMessageContent` | `appendMessageReplacement('record')` | `applyRecord` |
-| `deleteMessageWithReason`, `deleteFromOrderSeq` | `appendMessageRetraction` | `applyRetraction` |
+| `deleteMessageWithReason`, `deleteFromOrderSeq` | `appendMessageRetraction` | `applyRetractions` |
 | `restoreUserMessage` (retry of a failed prompt, called from `prepareRetryMessage`) | `appendMessageReplacement('record', reason 'retry_restored_prompt')` | `applyRecord` |
 | `cloneSentMessagesToSession` (fork) | `appendMessageRecord` per copied row, in the fork Session's Tape | `applyRecord` |
 | `recoverPendingMessages` | `appendMessageRecord` (revision key, status `error`) | `applyRecord` |

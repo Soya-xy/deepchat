@@ -266,11 +266,8 @@ const EXECUTION_JOURNAL_EVENT_NAMES_SQL = EXECUTION_JOURNAL_EVENT_NAMES.map(
  * are disjoint because `EffectiveInputKind` cannot name `event`; the kind lists are the same
  * constants the JS predicates test.
  */
-function effectiveInputRowsSql(
-  kinds: readonly EffectiveInputKind[],
-  options: { afterEntryId?: boolean } = {}
-): string {
-  const lowerBound = options.afterEntryId ? ' AND entry_id > $afterEntryId' : ''
+function effectiveInputRowsSql(kinds: readonly EffectiveInputKind[], afterEntryId = false): string {
+  const lowerBound = afterEntryId ? ' AND entry_id > $afterEntryId' : ''
   const ranges = [
     ...kinds.map(
       (kind) =>
@@ -286,9 +283,7 @@ const EFFECTIVE_VIEW_INPUT_ROWS_SQL = effectiveInputRowsSql(EFFECTIVE_VIEW_INPUT
 const EFFECTIVE_MESSAGE_INPUT_ROWS_SQL = effectiveInputRowsSql(EFFECTIVE_MESSAGE_INPUT_KINDS)
 const EFFECTIVE_MESSAGE_INPUT_ROWS_AFTER_SQL = effectiveInputRowsSql(
   EFFECTIVE_MESSAGE_INPUT_KINDS,
-  {
-    afterEntryId: true
-  }
+  true
 )
 
 export const UNTERMINATED_EXECUTION_JOURNAL_EVENTS_SQL = `

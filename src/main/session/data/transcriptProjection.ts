@@ -1,12 +1,5 @@
 import type { ChatMessageRecord, UserMessageContent } from '@shared/types/agent-interface'
-import logger from '@shared/logger'
 import { getAttachmentSearchableText } from '@shared/utils/attachmentRepresentation'
-import {
-  buildUsageStatsRecord,
-  parseMessageMetadata,
-  resolveUsageModelId,
-  resolveUsageProviderId
-} from '@/session/usageStats'
 import type { DeepChatTapeEntryRow } from '@/tape/domain/entry'
 import {
   parseTapeJsonObject,
@@ -131,51 +124,7 @@ export class TranscriptProjectionApplier {
   }
 }
 
-/**
- * Usage stats derive from an assistant message's metadata. The pending region updates them while a
- * reply streams and the assistant terminal writes record them once more from the final record.
- */
-export function persistMessageUsageStats(
-  database: SessionDatabase,
-  record: ChatMessageRecord
-): void {
-  if (record.role !== 'assistant') return
-  try {
-    const metadata = parseMessageMetadata(record.metadata)
-    if (metadata.messageType === 'compaction') {
-      return
-    }
-
-    const sessionRow = database.deepchatSessionsTable.get(record.sessionId)
-    const providerId = resolveUsageProviderId(metadata, sessionRow?.provider_id)
-    const modelId = resolveUsageModelId(metadata, sessionRow?.model_id)
-    if (!providerId || !modelId) {
-      return
-    }
-
-    const usageRecord = buildUsageStatsRecord({
-      messageId: record.id,
-      sessionId: record.sessionId,
-      createdAt: record.createdAt,
-      updatedAt: record.updatedAt,
-      providerId,
-      modelId,
-      metadata,
-      source: 'live'
-    })
-    if (usageRecord) {
-      database.deepchatUsageStatsTable.upsert(usageRecord)
-    }
-  } catch (error) {
-    logger.error(
-      'Failed to persist deepchat usage stats',
-      { messageId: record.id, source: 'live' },
-      error
-    )
-  }
-}
-
-export function extractSearchableMessageContent(rawContent: string): string {
+function extractSearchableMessageContent(rawContent: string): string {
   try {
     const parsed = JSON.parse(rawContent) as
       | UserMessageContent

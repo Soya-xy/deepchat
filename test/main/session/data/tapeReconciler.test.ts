@@ -167,7 +167,6 @@ describe('SessionTape reconciliation and facts', () => {
           sessionId: 's1',
           messageId: 'u1',
           entryId: entries.find((entry) => entry.kind === 'message')?.entry_id,
-          source: 'live',
           fields: ['content']
         })
       )

@@ -145,8 +145,7 @@ const MESSAGE_RECORD_DIVERGENCE_FIELDS = ['content', 'status', 'orderSeq', 'meta
 function warnOnDivergentMessageFact(
   row: DeepChatTapeEntryRow,
   payload: Record<string, unknown>,
-  record: ChatMessageRecord,
-  source: TapeFactSource
+  record: ChatMessageRecord
 ): void {
   if (row.payload_json === JSON.stringify(payload)) {
     return
@@ -163,7 +162,6 @@ function warnOnDivergentMessageFact(
     sessionId: record.sessionId,
     messageId: record.id,
     entryId: row.entry_id,
-    source,
     fields
   })
 }
@@ -547,7 +545,7 @@ export function appendMessageRecordToTape(
     idempotent: true
   })
   if (provenanceKey === undefined && source === 'live') {
-    warnOnDivergentMessageFact(row, payload, record, source)
+    warnOnDivergentMessageFact(row, payload, record)
   }
 
   const toolInputs = buildTapeToolFactInputs(record)

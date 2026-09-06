@@ -18,7 +18,13 @@ import type { DeepChatAssistantBlockRow } from '@/session/data/tables/deepchatAs
 import type { DeepChatUserMessageFileRow } from '@/session/data/tables/deepchatUserMessageFiles'
 import type { DeepChatUserMessageLinkRow } from '@/session/data/tables/deepchatUserMessageLinks'
 import type { DeepChatUserMessageRow } from '@/session/data/tables/deepchatUserMessages'
-import { buildCompactionUsageStatsRecord, parseMessageMetadata } from '@/session/usageStats'
+import {
+  buildCompactionUsageStatsRecord,
+  buildUsageStatsRecord,
+  parseMessageMetadata,
+  resolveUsageModelId,
+  resolveUsageProviderId
+} from '@/session/usageStats'
 import type {
   ExecutionJournalAuditReader,
   TapeAnchorReader,
@@ -38,7 +44,7 @@ import {
   toAssistantBlock,
   toMessageFile
 } from './messageContent'
-import { persistMessageUsageStats, TranscriptProjectionApplier } from './transcriptProjection'
+import { TranscriptProjectionApplier } from './transcriptProjection'
 
 const COMPACTION_SHIFT_MATERIALIZATION_BATCH_SIZE = 500
 const MAX_COMPACTION_ATTEMPT_ID_CHARACTERS = 128
@@ -329,7 +335,7 @@ export class SessionTranscript implements TapeTranscriptProjection {
     this.database.deepchatMessagesTable.updateMetadata(messageId, metadata)
     const row = this.database.deepchatMessagesTable.get(messageId)
     if (row?.role === 'assistant') {
-      persistMessageUsageStats(this.database, { ...this.recordFromRow(row), metadata })
+      this.persistUsageStats({ ...this.recordFromRow(row), metadata })
     }
   }
 
@@ -436,7 +442,7 @@ export class SessionTranscript implements TapeTranscriptProjection {
         updatedAt: Date.now()
       })
       this.commitRecord(record)
-      persistMessageUsageStats(this.database, record)
+      this.persistUsageStats(record)
     })
   }
 
@@ -496,7 +502,7 @@ export class SessionTranscript implements TapeTranscriptProjection {
       })
       this.commitRecord(record)
       if (metadata !== undefined) {
-        persistMessageUsageStats(this.database, record)
+        this.persistUsageStats(record)
       }
     })
   }
@@ -638,7 +644,7 @@ export class SessionTranscript implements TapeTranscriptProjection {
         this.projection.applyRetractions([messageId])
         return
       }
-      this.commitRetractions(record.sessionId, [record], reason, [messageId])
+      this.commitRetractions(record.sessionId, [record], reason)
     })
   }
 
@@ -647,12 +653,7 @@ export class SessionTranscript implements TapeTranscriptProjection {
       const records = this.getMessages(sessionId).filter(
         (record) => record.orderSeq >= fromOrderSeq
       )
-      this.commitRetractions(
-        sessionId,
-        records,
-        'messages_deleted_from_order_seq',
-        records.map((record) => record.id)
-      )
+      this.commitRetractions(sessionId, records, 'messages_deleted_from_order_seq')
       // The range delete is the table-level guarantee this method has always given: no row of the
       // Session at or past `fromOrderSeq` survives, whatever the read above surfaced.
       this.database.deepchatMessagesTable.deleteFromOrderSeq(sessionId, fromOrderSeq)
@@ -920,16 +921,11 @@ export class SessionTranscript implements TapeTranscriptProjection {
     this.markProjectionCurrent(record.sessionId)
   }
 
-  private commitRetractions(
-    sessionId: string,
-    records: ChatMessageRecord[],
-    reason: string,
-    messageIds: string[]
-  ): void {
+  private commitRetractions(sessionId: string, records: ChatMessageRecord[], reason: string): void {
     for (const record of records) {
       this.tapeFacts.appendMessageRetraction(record, reason)
     }
-    this.projection.applyRetractions(messageIds)
+    this.projection.applyRetractions(records.map((record) => record.id))
     this.markProjectionCurrent(sessionId)
   }
 
@@ -958,6 +954,48 @@ export class SessionTranscript implements TapeTranscriptProjection {
       ...record,
       content: canonicalizeMessageContent(record.role, record.content, record.updatedAt),
       traceCount: 0
+    }
+  }
+
+  /**
+   * Usage stats count provider calls, so only the assistant writes that follow one record them:
+   * the pending-region metadata update while a reply streams and the terminal write at its end.
+   * Fork, import, recovery and replay carry the same record without a call and stay out.
+   */
+  private persistUsageStats(record: ChatMessageRecord): void {
+    if (record.role !== 'assistant') return
+    try {
+      const metadata = parseMessageMetadata(record.metadata)
+      if (metadata.messageType === 'compaction') {
+        return
+      }
+
+      const sessionRow = this.database.deepchatSessionsTable.get(record.sessionId)
+      const providerId = resolveUsageProviderId(metadata, sessionRow?.provider_id)
+      const modelId = resolveUsageModelId(metadata, sessionRow?.model_id)
+      if (!providerId || !modelId) {
+        return
+      }
+
+      const usageRecord = buildUsageStatsRecord({
+        messageId: record.id,
+        sessionId: record.sessionId,
+        createdAt: record.createdAt,
+        updatedAt: record.updatedAt,
+        providerId,
+        modelId,
+        metadata,
+        source: 'live'
+      })
+      if (usageRecord) {
+        this.database.deepchatUsageStatsTable.upsert(usageRecord)
+      }
+    } catch (error) {
+      logger.error(
+        'Failed to persist deepchat usage stats',
+        { messageId: record.id, source: 'live' },
+        error
+      )
     }
   }
 

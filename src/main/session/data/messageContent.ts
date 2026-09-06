@@ -82,7 +82,7 @@ export function parseAssistantBlocks(rawContent: string): AssistantMessageBlock[
 // User files: the values `deepchat_user_message_files.replaceForMessage` receives and the columns
 // it reads back.
 
-export interface UserMessageFileRowInput {
+interface UserMessageFileRowInput {
   name?: string
   path: string
   mimeType?: string
@@ -90,7 +90,7 @@ export interface UserMessageFileRowInput {
   metadataJson?: string | null
 }
 
-export type StoredUserMessageFile = Pick<
+type StoredUserMessageFile = Pick<
   DeepChatUserMessageFileRow,
   'name' | 'path' | 'mime_type' | 'size' | 'metadata_json'
 >
@@ -187,7 +187,7 @@ export type PersistedBlockExtra = {
   reasoningTime?: number
 }
 
-export type AssistantBlockRowInput = Omit<DeepChatAssistantBlockRow, 'message_id' | 'block_index'>
+type AssistantBlockRowInput = Omit<DeepChatAssistantBlockRow, 'message_id' | 'block_index'>
 
 function buildPersistedExtra(block: AssistantMessageBlock): PersistedBlockExtra {
   return {
