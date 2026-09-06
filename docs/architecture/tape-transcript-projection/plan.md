@@ -71,22 +71,27 @@ Completion: `ensureSessionTapeReady` is O(delta) and the transcript digest is go
 
 ## Slice 5: Documentation and test alignment
 
-- [ ] `docs/architecture/tape-system.md`: lines 26–27 describe the transcript as the derived
-      projection and UI read model of Context Tape message facts; the "Message projection 与 Context
-      facts" section states fact-first order and the one-time migration backfill.
-- [ ] Rewrite `tapeReconciler.test.ts` cases that assert transcript-bypass backfill into projection
-      replay cases; keep the tool-revision and legacy-summary cases.
-- [ ] Update `tapeTestHarness.ts` / `tapeTableMockContract.test.ts` only where the new meta table or
-      applier needs a mock surface.
+- [x] `docs/architecture/tape-system.md`: the transcript is described as the derived projection and
+      UI read model of Context Tape message facts; the transaction-boundary and "Message projection
+      与 Context facts" sections state the fact-first order, the cursor rule and the one-time
+      backfill; the test map names the new suites.
+- [x] `tapeReconciler.test.ts` cases that asserted transcript-bypass backfill became projection
+      cursor cases; tool-revision and legacy-summary cases stay.
+- [x] `tapeTestHarness.ts` gained `createTranscriptProjectionMock` and the range read;
+      `tapeTableMockContract.test.ts` pins the range read against the real store.
 
 Completion: docs match code; no test asserts the removed backfill direction.
 
 ## Whole-change review and gates
 
-- [ ] Review against the spec for hidden side effects, compatibility, failure behavior,
+- [x] Review against the spec for hidden side effects, compatibility, failure behavior,
       performance, security, naming and maintenance cost before each commit.
-- [ ] `pnpm run format`, `pnpm run i18n`, `pnpm run lint`, `pnpm run typecheck`.
-- [ ] `test/main/session`, `test/main/tape`, `test/main/agent/deepchat`; real-SQLite contract
-      suites under the Electron ABI.
+- [x] `pnpm run format`, `pnpm run lint`, `pnpm run typecheck` (no user copy changed, so `i18n`
+      was not needed).
+- [x] `test/main/session`, `test/main/tape`, `test/main/agent`, `test/main/app`, `test/main/data`,
+      `test/main/memory` under the Electron ABI: 4268 passed; the 17 failures are pre-existing
+      local environment failures (`acpTerminalAuthRunner` PTY timeout,
+      `sessionDataMigrations.sqlite`, `mainDatabase`, `deepchatPendingInputsTable`) verified on
+      the base commit.
 - [ ] Manual: new chat, resume, edit, delete, steer, manual compaction, fork, legacy import; compare
       Inspector rows with the UI.
