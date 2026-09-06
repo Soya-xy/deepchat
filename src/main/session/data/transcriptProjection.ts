@@ -89,17 +89,23 @@ export class TranscriptProjectionApplier {
     }
   }
 
-  /** Removes every message-scoped row, including the runtime sidecars keyed by message id. */
+  /**
+   * Removes every message-scoped row, including the runtime sidecars keyed by message id. A range
+   * delete can hand over a whole Session, so the ids go through in chunks that stay below SQLite's
+   * bound-variable floor on every table.
+   */
   applyRetractions(messageIds: string[]): void {
-    if (messageIds.length === 0) return
-    this.database.deepchatSearchDocumentsTable.deleteByMessageIds(messageIds)
-    this.database.deepchatAssistantBlocksTable.deleteByMessageIds(messageIds)
-    this.database.deepchatUserMessageLinksTable.deleteByMessageIds(messageIds)
-    this.database.deepchatUserMessageFilesTable.deleteByMessageIds(messageIds)
-    this.database.deepchatUserMessagesTable.deleteByMessageIds(messageIds)
-    this.database.deepchatMessageTracesTable.deleteByMessageIds(messageIds)
-    this.database.deepchatMessageSearchResultsTable.deleteByMessageIds(messageIds)
-    this.database.deepchatMessagesTable.deleteByIds(messageIds)
+    for (let offset = 0; offset < messageIds.length; offset += 500) {
+      const chunk = messageIds.slice(offset, offset + 500)
+      this.database.deepchatSearchDocumentsTable.deleteByMessageIds(chunk)
+      this.database.deepchatAssistantBlocksTable.deleteByMessageIds(chunk)
+      this.database.deepchatUserMessageLinksTable.deleteByMessageIds(chunk)
+      this.database.deepchatUserMessageFilesTable.deleteByMessageIds(chunk)
+      this.database.deepchatUserMessagesTable.deleteByMessageIds(chunk)
+      this.database.deepchatMessageTracesTable.deleteByMessageIds(chunk)
+      this.database.deepchatMessageSearchResultsTable.deleteByMessageIds(chunk)
+      this.database.deepchatMessagesTable.deleteByIds(chunk)
+    }
   }
 
   private persistUserContent(messageId: string, content: UserMessageContent): void {

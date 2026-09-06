@@ -1,5 +1,7 @@
 import type { ChatMessageRecord } from '@shared/types/agent-interface'
+import logger from '@shared/logger'
 import type { TapeApplicationProviders } from '../ports/application'
+import type { DeepChatTapeEntryRow } from '../domain/entry'
 import type {
   TapeBackfillResult,
   TapeProjectionCursor,
@@ -145,15 +147,27 @@ export class TapeReconcilerService {
     transcriptRecords: readonly ChatMessageRecord[]
   ): void {
     const transcriptIds = new Set(transcriptRecords.map((record) => record.id))
-    const tapeOnlyRows = buildEffectiveTapeView(
-      this.table.getEffectiveMessageInputRows(sessionId),
-      {
-        includePending: true
-      }
-    ).rows.filter((row) => {
+    const tapeOnlyRows: DeepChatTapeEntryRow[] = []
+    let foreignSessionCount = 0
+    for (const row of buildEffectiveTapeView(this.table.getEffectiveMessageInputRows(sessionId), {
+      includePending: true
+    }).rows) {
       const record = tapeEntryToMessageRecord(row)
-      return record !== null && !transcriptIds.has(record.id)
-    })
+      if (record === null || transcriptIds.has(record.id)) continue
+      // A fact whose record names another Session cannot be projected here without moving a row
+      // between Sessions; skipping it keeps one corrupt entry from failing every readiness check.
+      if (record.sessionId !== sessionId) {
+        foreignSessionCount += 1
+        continue
+      }
+      tapeOnlyRows.push(row)
+    }
+    if (foreignSessionCount > 0) {
+      logger.warn('[Tape] skipped message facts whose record names another session', {
+        sessionId,
+        count: foreignSessionCount
+      })
+    }
     if (tapeOnlyRows.length > 0) {
       transcript.applyTapeEntries(tapeOnlyRows)
     }

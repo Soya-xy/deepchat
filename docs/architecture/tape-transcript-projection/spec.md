@@ -105,7 +105,8 @@ transcript tables.
   terminal writes (`finalizeAssistantMessage`, `setMessageError` with metadata) record usage
   themselves, as the pending-region metadata update already does.
 - `applyRetractions(messageIds)`: delete the eight message-scoped rows exactly as
-  `deleteMessageWithReason` does today, including the two sidecars.
+  `deleteMessageWithReason` does today, including the two sidecars, in chunks of 500 ids so a range
+  delete over a whole Session stays below SQLite's bound-variable floor on every table.
 - `applyTapeEntries(rows)`: the reconciler reads the effective message input rows with `entry_id`
   past the cursor and hands them over in entry order; message facts go through
   `applyRecord(payload.record)` and `message/retracted` events through `applyRetractions`. It never
@@ -162,7 +163,9 @@ the Tape reset; the legacy import overwrite clears it with the other legacy-owne
    The backfill is the upgrade path for Sessions whose Tape fell behind before this change (a fork,
    import or recovery that was never followed by a turn) and keeps the applier from replaying an
    empty Tape over a populated transcript; the reverse projection keeps the cursor honest for a fact
-   that entered the Tape without going through the transcript, which no path produces today.
+   that entered the Tape without going through the transcript, which no path produces today. A
+   fact whose record names another Session is skipped with one warning per Session rather than
+   projected, since applying it would move a row between Sessions and fail every readiness check.
    This step only adds. A transcript row whose Tape fact was retracted is kept and the retraction is
    not applied: with no cursor, the transcript is the record the user has been looking at, and a
    Session without a cursor is exactly the one whose Tape may be stale. Deleting a row here would
