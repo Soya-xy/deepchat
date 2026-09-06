@@ -1910,6 +1910,20 @@ describe('SessionTape view and replay', () => {
     expect(second?.trace?.bodyJson).toContain('second-request')
   })
 
+  it('binds replay to the latest physical attempt for a request sequence', () => {
+    const { table } = createTapeTableMock()
+    const service = createTapeService(table, [
+      createTraceRow({ id: 'attempt-1', request_seq: 2, physical_attempt: 1, created_at: 500 }),
+      createTraceRow({ id: 'attempt-2', request_seq: 2, physical_attempt: 2, created_at: 400 })
+    ])
+    service.appendViewManifest(createObservationManifest({ requestSeq: 2 }))
+
+    expect(service.exportReplaySlice('s1', 'a1', { requestSeq: 2 })?.trace).toMatchObject({
+      id: 'attempt-2',
+      physicalAttempt: 2
+    })
+  })
+
   it('returns null when exporting a replay slice without a manifest', () => {
     const { table } = createTapeTableMock()
     const service = createTapeService(table, [createTraceRow()])
