@@ -1096,23 +1096,6 @@ export function buildExecutionContract(
   return deepFreeze(contract)
 }
 
-export function verifyExecutionContractHash(contract: DeepChatExecutionContract): boolean {
-  if (
-    contract?.schemaVersion !== DEEPCHAT_EXECUTION_CONTRACT_SCHEMA_VERSION ||
-    contract?.hashVersion !== DEEPCHAT_EXECUTION_CONTRACT_HASH_VERSION ||
-    typeof contract.contractHash !== 'string' ||
-    !SHA256_HEX_PATTERN.test(contract.contractHash)
-  ) {
-    return false
-  }
-  try {
-    const { contractHash, ...draft } = contract
-    return buildContractHash(draft) === contractHash
-  } catch {
-    return false
-  }
-}
-
 export function isDeepChatExecutionContract(value: unknown): value is DeepChatExecutionContract {
   try {
     const serialized = canonicalJsonStringifyData(value)
