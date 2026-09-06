@@ -101,9 +101,11 @@ function normalizeJsonData(
  * `manifestHash` / `promptHash` / `toolDefinitionsHash` (the default interactive-chat manifest),
  * tool fact provenance keys, and Execution Journal v1 operation keys, run keys, `responseHash`
  * and `errorHash`. Those producers depend on this exact coercion (tool fact payloads carry
- * `undefined` optional fields that `hashJsonData` rejects), and any digest drift makes an old
- * Session append duplicate facts on replay or fail stored-manifest verification. New fact
- * families must use `hashJsonData`; existing producers stay on this function.
+ * `undefined` optional fields that `hashJsonData` rejects). Any digest drift makes an old Session
+ * append duplicate tool facts on backfill, fail stored-manifest verification, and classify its
+ * Journal history as corruption because fact parsing rebuilds each provenance key and compares
+ * it with the stored one. New fact families must use `hashJsonData`; existing producers stay on
+ * this function.
  */
 export function stableJsonStringify(value: unknown): string {
   return JSON.stringify(normalizeForStableJson(value))
