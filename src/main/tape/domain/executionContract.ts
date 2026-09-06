@@ -35,6 +35,8 @@ import {
   canonicalUuid,
   compareUtf16,
   deepFreeze,
+  hasExactKeys,
+  isRecordObject,
   SHA256_HEX_PATTERN,
   utf8Length
 } from './primitives'
@@ -293,25 +295,6 @@ function hashData(value: unknown, label: string, omitUndefinedProperties = false
       cause: error
     })
   }
-}
-
-function isRecordObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
-}
-
-function hasExactKeys(
-  value: unknown,
-  requiredKeys: readonly string[],
-  optionalKeys: readonly string[] = []
-): value is Record<string, unknown> {
-  if (!isRecordObject(value)) return false
-  const actualKeys = Object.keys(value)
-  const allowedKeys = new Set([...requiredKeys, ...optionalKeys])
-  return (
-    requiredKeys.every((key) => Object.hasOwn(value, key)) &&
-    actualKeys.every((key) => allowedKeys.has(key)) &&
-    actualKeys.length >= requiredKeys.length
-  )
 }
 
 function matchesNormalizedString(

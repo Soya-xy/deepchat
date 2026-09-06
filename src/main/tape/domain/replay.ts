@@ -8,7 +8,7 @@ import { isDeepChatExecutionContract } from './executionContract'
 import { hashJson } from './viewManifest'
 import { validateSchema6SkillContexts, validateSchema7SkillContexts } from './skillContext'
 import { isBoundedSkillTapeIdentity } from './skillIdentity'
-import { SHA256_HEX_PATTERN } from './primitives'
+import { isRecordObject, SHA256_HEX_PATTERN } from './primitives'
 
 const VIEW_POLICIES = new Set([
   'cache_aware_context_v2',
@@ -47,10 +47,6 @@ const VIEW_EXCLUDED_REASONS = new Set([
   'superseded',
   'retracted'
 ])
-
-function isRecordObject(value: unknown): value is Record<string, unknown> {
-  return Boolean(value && typeof value === 'object' && !Array.isArray(value))
-}
 
 function isNullableString(value: unknown): value is string | null {
   return value === null || typeof value === 'string'
