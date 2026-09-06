@@ -280,31 +280,6 @@ describe('SessionTape reconciliation and facts', () => {
       expect(transcript.cursor!.maxEntryId).toBe(table.getMaxEntryId('s1'))
     })
 
-    it('skips a Tape-only fact whose record names another session and says so once', () => {
-      vi.mocked(logger.warn).mockClear()
-      const { service, transcript, table } = createReconcileHarness([])
-      // Appended under s1 but describing s2: projecting it would move a row between Sessions.
-      table.append({
-        sessionId: 's1',
-        kind: 'message',
-        name: 'message/user',
-        source: { type: 'message', id: 'foreign', seq: 0 },
-        payload: { record: createRecord({ id: 'foreign', sessionId: 's2', orderSeq: 1 }) },
-        meta: { source: 'live', orderSeq: 1, role: 'user', status: 'sent' },
-        idempotent: true
-      })
-
-      const result = service.ensureSessionTapeReady('s1', transcript as any)
-
-      expect(transcript.applyTapeEntries).not.toHaveBeenCalled()
-      expect(logger.warn).toHaveBeenCalledWith(
-        expect.stringContaining('another session'),
-        expect.objectContaining({ sessionId: 's1', count: 1 })
-      )
-      expect(result.historyRecords.map((record) => record.id)).toEqual(['foreign'])
-      expect(transcript.cursor!.maxEntryId).toBe(table.getMaxEntryId('s1'))
-    })
-
     it('keeps a transcript row whose Tape fact was retracted when there is no cursor yet', () => {
       // Unreachable by construction (delete removes the row and appends the retraction in one
       // transaction); pinned because the first projection must only add.

@@ -163,9 +163,7 @@ the Tape reset; the legacy import overwrite clears it with the other legacy-owne
    The backfill is the upgrade path for Sessions whose Tape fell behind before this change (a fork,
    import or recovery that was never followed by a turn) and keeps the applier from replaying an
    empty Tape over a populated transcript; the reverse projection keeps the cursor honest for a fact
-   that entered the Tape without going through the transcript, which no path produces today. A
-   fact whose record names another Session is skipped with one warning per Session rather than
-   projected, since applying it would move a row between Sessions and fail every readiness check.
+   that entered the Tape without going through the transcript, which no path produces today.
    This step only adds. A transcript row whose Tape fact was retracted is kept and the retraction is
    not applied: with no cursor, the transcript is the record the user has been looking at, and a
    Session without a cursor is exactly the one whose Tape may be stale. Deleting a row here would
