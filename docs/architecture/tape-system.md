@@ -435,7 +435,8 @@ shape 校验要求的字段离开写入端则必须伴随新 schemaVersion；Exe
 tool surface fact 与 Journal payload 用 exact-key 校验，删除任一字段或新增必填字段都会让历史行 malformed。两类
 失效都会让 `skill_run`、paused dispatch 与 pending action 恢复 fail closed，Journal 历史则被归类为 corruption。
 legacy `hashJson` 不是只读兼容路径，它仍在产出 schema-4 manifest hash、tool fact provenance key 与 Execution
-Journal v1 key/`responseHash`，不得替换；schema 5 起的新 identity 一律用 `hashJsonData`。Tape 中的 hash 分两类：
+Journal v1 key/`responseHash`/`errorHash`，不得替换；schema 5 起的新 identity 一律用 `hashJsonData`。Tape 中的
+hash 分两类：
 fact 信封与 payload 的自校验（tool surface 三个 fact 的信封 hash、materialization meta `payloadHash`），以及把
 Tape 之外的对象（provider 投影、process-live capability、执行包临时目录、projection row、pause binding）绑定到
 entry 的凭据；后者不是对不可变 entry 的双重保证，entryId 无法替代它们。
