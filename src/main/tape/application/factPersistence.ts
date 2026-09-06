@@ -138,7 +138,9 @@ const MESSAGE_RECORD_DIVERGENCE_FIELDS = ['content', 'status', 'orderSeq', 'meta
  * entry it already holds without looking at the payload. That is the intended idempotency for a
  * message that is finalized once; it also means a transcript row whose content changed without a
  * replacement fact would leave Tape stale in silence. Compare what came back with what was asked
- * for and say so when they differ. Payload text stays out of the log.
+ * for and say so when they differ. Payload text stays out of the log. Only live appends report:
+ * a backfill re-reading an old Session compares today's materialized content with a fact written
+ * by an earlier version, and that difference is format history rather than a bypassed write.
  */
 function warnOnDivergentMessageFact(
   row: DeepChatTapeEntryRow,
@@ -544,7 +546,7 @@ export function appendMessageRecordToTape(
     createdAt: record.createdAt,
     idempotent: true
   })
-  if (provenanceKey === undefined) {
+  if (provenanceKey === undefined && source === 'live') {
     warnOnDivergentMessageFact(row, payload, record, source)
   }
 

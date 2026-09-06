@@ -24,6 +24,10 @@ const SEARCH_ATTACHMENT_TRUNCATION_MARKER = '[Attachment search text truncated]'
  * is the one carried by the message fact, so live writes and replay from Tape run the same code
  * and cannot leave a table behind. Every write is an UPSERT or a replace keyed by message id;
  * nothing here deletes a row except `applyRetractions`, and nothing here opens a transaction.
+ *
+ * Usage stats are not part of the projection. They count provider calls, and a record reaches the
+ * applier again on fork, import, recovery and replay without any call having happened; the
+ * assistant terminal writes record usage themselves.
  */
 export class TranscriptProjectionApplier {
   constructor(private readonly database: SessionDatabase) {}
@@ -58,7 +62,6 @@ export class TranscriptProjectionApplier {
     if (record.status !== 'pending') {
       this.upsertSearchDocument(record)
     }
-    this.persistUsageStats(record)
   }
 
   /**
@@ -126,15 +129,11 @@ export class TranscriptProjectionApplier {
       updatedAt: record.updatedAt
     })
   }
-
-  private persistUsageStats(record: ChatMessageRecord): void {
-    persistMessageUsageStats(this.database, record)
-  }
 }
 
 /**
  * Usage stats derive from an assistant message's metadata. The pending region updates them while a
- * reply streams; the applier writes them once more from the terminal record.
+ * reply streams and the assistant terminal writes record them once more from the final record.
  */
 export function persistMessageUsageStats(
   database: SessionDatabase,

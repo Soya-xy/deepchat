@@ -427,16 +427,16 @@ export class SessionTranscript implements TapeTranscriptProjection {
     this.runInDatabaseTransaction(() => {
       const row = this.database.deepchatMessagesTable.get(messageId)
       if (!row) return
-      this.commitRecord(
-        this.terminalRecord({
-          ...this.recordFromRow(row),
-          role: 'assistant',
-          content: JSON.stringify(blocks),
-          status: 'sent',
-          metadata,
-          updatedAt: Date.now()
-        })
-      )
+      const record = this.terminalRecord({
+        ...this.recordFromRow(row),
+        role: 'assistant',
+        content: JSON.stringify(blocks),
+        status: 'sent',
+        metadata,
+        updatedAt: Date.now()
+      })
+      this.commitRecord(record)
+      persistMessageUsageStats(this.database, record)
     })
   }
 
@@ -486,16 +486,18 @@ export class SessionTranscript implements TapeTranscriptProjection {
     this.runInDatabaseTransaction(() => {
       const row = this.database.deepchatMessagesTable.get(messageId)
       if (!row) return
-      this.commitRecord(
-        this.terminalRecord({
-          ...this.recordFromRow(row),
-          role: 'assistant',
-          content: JSON.stringify(blocks),
-          status: 'error',
-          metadata: metadata ?? row.metadata,
-          updatedAt: Date.now()
-        })
-      )
+      const record = this.terminalRecord({
+        ...this.recordFromRow(row),
+        role: 'assistant',
+        content: JSON.stringify(blocks),
+        status: 'error',
+        metadata: metadata ?? row.metadata,
+        updatedAt: Date.now()
+      })
+      this.commitRecord(record)
+      if (metadata !== undefined) {
+        persistMessageUsageStats(this.database, record)
+      }
     })
   }
 
@@ -937,6 +939,10 @@ export class SessionTranscript implements TapeTranscriptProjection {
    * incarnation is left alone: its transcript may still hold rows the Tape never saw (written
    * before the projection existed, or before a Tape reset), and only reconciliation's one-time
    * backfill may declare the two aligned.
+   *
+   * Moving straight to the head relies on message facts entering the Tape only through this
+   * class and reconciliation's backfill. A third writer of `message/*` facts would have to replay
+   * the rows between the cursor and the head before advancing it.
    */
   private markProjectionCurrent(sessionId: string): void {
     const head = this.tapeHead.getProjectionHead(sessionId)

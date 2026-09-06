@@ -118,9 +118,23 @@ describe('SessionTape reconciliation and facts', () => {
       const record = createRecord({ id: 'u1', orderSeq: 1 })
 
       appendMessageRecordToTape(table as any, record, 'live')
-      appendMessageRecordToTape(table as any, { ...record, traceCount: 3 }, 'backfill')
+      appendMessageRecordToTape(table as any, { ...record, traceCount: 3 }, 'live')
 
       expect(entries.filter((entry) => entry.kind === 'message')).toHaveLength(1)
+      expect(logger.warn).not.toHaveBeenCalled()
+    })
+
+    it('does not report a backfill that meets a fact written by an earlier version', () => {
+      const { table } = createTapeTableMock()
+      const record = createRecord({ id: 'u1', orderSeq: 1 })
+
+      appendMessageRecordToTape(table as any, record, 'live')
+      appendMessageRecordToTape(
+        table as any,
+        { ...record, content: JSON.stringify({ text: 'hello', files: [], links: [] }) },
+        'backfill'
+      )
+
       expect(logger.warn).not.toHaveBeenCalled()
     })
 

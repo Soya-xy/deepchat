@@ -1140,6 +1140,27 @@ describe('SessionTranscript', () => {
       expect(forkedFacts.map((input: any) => input.payload.record.orderSeq)).toEqual([1, 2])
       expect(forkedFacts.every((input: any) => input.sessionId === 'fork')).toBe(true)
     })
+
+    it('does not count the copied assistant usage a second time', () => {
+      sqlitePresenter.deepchatSessionsTable.get.mockReturnValue({
+        provider_id: 'openai',
+        model_id: 'gpt-4o'
+      })
+      sqlitePresenter.deepchatMessagesTable.getBySessionUpToOrderSeq.mockReturnValue([
+        createMessageRow({ id: 'user-1', order_seq: 1 }),
+        createMessageRow({
+          id: 'assistant-1',
+          order_seq: 2,
+          role: 'assistant',
+          content: '[]',
+          metadata: JSON.stringify({ inputTokens: 120, outputTokens: 30, totalTokens: 150 })
+        })
+      ])
+
+      store.cloneSentMessagesToSession('source', 'fork', 2)
+
+      expect(sqlitePresenter.deepchatUsageStatsTable.upsert).not.toHaveBeenCalled()
+    })
   })
 
   describe('deleteBySession', () => {

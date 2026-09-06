@@ -67,7 +67,8 @@ derived from it in the same transaction.
 | Family | Role | Producer |
 | --- | --- | --- |
 | Tape `message/*` facts, `message/retracted` and `message/compaction_indicator` events | Terminal message facts | `TapeMessageFactWriter` called by transcript terminal writes |
-| Transcript terminal rows (`deepchat_messages` with status `sent`/`error`, `deepchat_user_messages`, `_files`, `_links`, `deepchat_assistant_blocks`, `deepchat_search_documents`, `deepchat_usage_stats` message rows) | UI read model, derived | `TranscriptProjectionApplier` |
+| Transcript terminal rows (`deepchat_messages` with status `sent`/`error`, `deepchat_user_messages`, `_files`, `_links`, `deepchat_assistant_blocks`, `deepchat_search_documents`) | UI read model, derived | `TranscriptProjectionApplier` |
+| `deepchat_usage_stats` message rows | Provider call accounting | Assistant terminal writes and the pending-region metadata update, as today |
 | Transcript pending region (`deepchat_messages` status `pending` and its block rows) | Live streaming buffer | `SessionTranscript` directly, as today |
 | Sidecars (`deepchat_message_traces`, `deepchat_message_search_results`) | Runtime evidence | Runtime, as today |
 
@@ -96,10 +97,13 @@ Owned by `src/main/session/data/`. It is the only code that writes terminal stat
 transcript tables.
 
 - `applyRecord(record)`: UPSERT `deepchat_messages` (id, session, order, role, content, status,
-  is_context_edge, metadata, created_at, updated_at), replace the role tables from `content`,
-  upsert the search document for `sent`/`error` rows, and upsert usage stats for assistant rows with
-  usage metadata. Compaction marker rows (`metadata.messageType === 'compaction'`) are applied with
-  the same UPSERT.
+  is_context_edge, metadata, created_at, updated_at), replace the role tables from `content`, and
+  upsert the search document (user rows always, assistant rows once terminal). Compaction marker
+  rows (`metadata.messageType === 'compaction'`) are applied with the same UPSERT. Usage stats are
+  not part of the projection: they count provider calls, and the same record reaches the applier
+  again on fork, import, recovery and replay without a call having happened. The assistant
+  terminal writes (`finalizeAssistantMessage`, `setMessageError` with metadata) record usage
+  themselves, as the pending-region metadata update already does.
 - `applyRetraction(messageId)`: delete the eight message-scoped rows exactly as
   `deleteMessageWithReason` does today, including the two sidecars.
 - `replay(sessionId, afterEntryId)`: read effective message input rows with `entry_id >
@@ -147,7 +151,7 @@ same transaction. A write does not create the row: a Session without a cursor fo
 incarnation may still hold transcript rows the Tape never saw (rows written before the projection
 existed, or before a Tape reset), and only readiness step 2 below may declare the two aligned.
 `clearMessages` deletes the row inside its existing transaction, next to the transcript delete and
-the Tape reset.
+the Tape reset; the legacy import overwrite clears it with the other legacy-owned tables.
 
 `ensureSessionTapeReady(sessionId)` becomes:
 
@@ -176,10 +180,13 @@ records through `TapeProjectionHeadReader.getProjectionHead`.
 ### Idempotent payload guard
 
 `appendMessageRecordToTape` compares the row the store returned with the record it tried to
-append whenever the provenance key was derived (a `sent` record appended live or by backfill). If
-`content`, `status`, `orderSeq` or `metadata` differ, it logs one warning with the session id,
-message id, source and the names of the differing fields. Payload text is never logged. The append
-result is unchanged; the guard only makes a divergence visible.
+append whenever the provenance key was derived and the append is live (a `sent` record written by
+the transcript, including fork, import and recovery). If `content`, `status`, `orderSeq` or
+`metadata` differ, it logs one warning with the session id, message id, source and the names of the
+differing fields. Payload text is never logged. Backfill appends do not report: a backfill of an
+old Session compares today's materialized content with a fact written by an earlier version, and
+that is format history, not a bypassed write. The append result is unchanged; the guard only makes
+a divergence visible.
 
 ### Ownership and layering
 

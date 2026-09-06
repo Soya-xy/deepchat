@@ -174,6 +174,7 @@ export class LegacyChatImportService {
         DELETE FROM deepchat_messages;
         DELETE FROM deepchat_usage_stats;
         DELETE FROM deepchat_tape_entries;
+        DELETE FROM deepchat_transcript_projection_meta;
         DELETE FROM deepchat_memory_ingestion_projection;
         DELETE FROM deepchat_memory_ingestion_projection_meta;
         DELETE FROM deepchat_tape_search_projection;
