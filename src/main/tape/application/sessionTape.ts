@@ -13,8 +13,6 @@ import type {
   DeepChatTapeViewManifestRecord
 } from '@shared/types/tape-view-manifest'
 import type {
-  DeepChatCausalObservationReadOptions,
-  DeepChatCausalObservationSlice,
   DeepChatTapeReplayExportOptions,
   DeepChatTapeReplaySlice
 } from '@shared/types/tape-replay'
@@ -458,14 +456,6 @@ export class SessionTape implements SessionTapeCapabilities {
     options: DeepChatTapeReplayExportOptions = {}
   ): DeepChatTapeReplaySlice | null {
     return this.viewReplay.exportReplaySlice(sessionId, messageId, options)
-  }
-
-  readCausalObservationSlice(
-    sessionId: string,
-    messageId: string,
-    options: DeepChatCausalObservationReadOptions = {}
-  ): DeepChatCausalObservationSlice {
-    return this.viewReplay.readCausalObservationSlice(sessionId, messageId, options)
   }
 
   handoff(

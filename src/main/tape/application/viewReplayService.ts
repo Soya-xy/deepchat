@@ -5,9 +5,6 @@ import type {
   DeepChatTapeViewManifestV7
 } from '@shared/types/tape-view-manifest'
 import type {
-  DeepChatCausalObservationReadOptions,
-  DeepChatCausalObservationRequest,
-  DeepChatCausalObservationSlice,
   DeepChatTapeReplayEntrySnapshot,
   DeepChatTapeReplayExportOptions,
   DeepChatTapeReplaySlice,
@@ -62,7 +59,7 @@ import type { TapeViewManifestAssemblySources } from './contracts'
 
 type TapeViewReplayProviders = Pick<
   TapeApplicationProviders,
-  'getEntryStore' | 'getMessageTraceReader' | 'getTerminalMessageReader'
+  'getEntryStore' | 'getMessageTraceReader'
 >
 
 const BOOTSTRAP_ANCHOR_NAME = 'session/start'
@@ -1136,112 +1133,6 @@ export class TapeViewReplayService {
     }
 
     return this.buildReplaySlice(sessionId, messageId, manifestRecord, options)
-  }
-
-  readCausalObservationSlice(
-    sessionId: string,
-    messageId: string,
-    options: DeepChatCausalObservationReadOptions = {}
-  ): DeepChatCausalObservationSlice {
-    if (options.requestSeq !== undefined && !isPositiveInteger(options.requestSeq)) {
-      throw new Error('requestSeq must be a positive integer.')
-    }
-
-    const rows = this.table.getBySessionExcludingContext(sessionId)
-    const manifestRows = rows.filter(
-      (row) =>
-        row.kind === 'event' &&
-        row.name === TAPE_VIEW_MANIFEST_EVENT_NAME &&
-        row.source_type === 'runtime_event' &&
-        row.source_id === messageId
-    )
-    const traces = this.providers
-      .getMessageTraceReader()
-      .listByMessageId(messageId)
-      .filter(
-        (row) =>
-          row.session_id === sessionId &&
-          row.message_id === messageId &&
-          isPositiveInteger(row.request_seq)
-      )
-
-    const requestSeq =
-      options.requestSeq ??
-      [...manifestRows.map((row) => row.source_seq), ...traces.map((row) => row.request_seq)]
-        .filter((value): value is number => typeof value === 'number' && isPositiveInteger(value))
-        .reduce<number | null>((latest, value) => Math.max(latest ?? value, value), null)
-
-    let request: DeepChatCausalObservationRequest
-    if (requestSeq === null) {
-      request = { state: 'request_unavailable', requestSeq: null, trace: null }
-    } else {
-      const selectedManifestRows = manifestRows.filter((row) => row.source_seq === requestSeq)
-      const manifestRecord = selectedManifestRows
-        .map((row) => this.toViewManifestRecord(row))
-        .find((record) => record?.messageId === messageId && record.requestSeq === requestSeq)
-      const trace = this.selectLatestTrace(traces, sessionId, requestSeq)
-
-      if (manifestRecord) {
-        request = {
-          state: 'manifest_bound',
-          requestSeq,
-          replay: this.buildReplaySlice(sessionId, messageId, manifestRecord, options)
-        }
-      } else {
-        request = {
-          state: selectedManifestRows.length > 0 ? 'manifest_malformed' : 'manifest_missing',
-          requestSeq,
-          trace: trace
-            ? this.toReplayTraceSnapshot(trace, options.includeTracePayload === true)
-            : null
-        }
-      }
-    }
-
-    const outputEntries = buildEffectiveTapeView(rows, { includePending: false })
-      .rows.filter(
-        (row) =>
-          (row.kind === 'message' &&
-            row.source_type === 'message' &&
-            row.source_id === messageId) ||
-          ((row.kind === 'tool_call' || row.kind === 'tool_result') &&
-            readToolFactMessageId(row) === messageId)
-      )
-      .map((row) => this.toReplayEntrySnapshot(row, options.includeTapePayloads === true))
-    const message = this.providers.getTerminalMessageReader().get(messageId)
-    const terminalMessage =
-      message?.session_id === sessionId &&
-      message.role === 'assistant' &&
-      (message.status === 'sent' || message.status === 'error')
-        ? {
-            status: message.status,
-            orderSeq: message.order_seq,
-            createdAt: message.created_at,
-            updatedAt: message.updated_at,
-            contentHash: hashString(message.content),
-            metadataHash: hashString(message.metadata)
-          }
-        : null
-
-    return {
-      schemaVersion: 1,
-      sessionId,
-      messageId,
-      request,
-      output: {
-        correlation: 'message_only',
-        entries: outputEntries,
-        terminalMessage
-      },
-      runtime:
-        options.currentRuntimeStatus === undefined
-          ? { scope: 'unavailable', status: null, eventHistory: 'not_persisted' }
-          : {
-              scope: 'current_only',
-              status: options.currentRuntimeStatus,
-              eventHistory: 'not_persisted'
-            }
-    }
   }
 
   private buildReplaySlice(
