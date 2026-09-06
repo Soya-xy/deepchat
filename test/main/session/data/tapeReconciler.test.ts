@@ -263,6 +263,23 @@ describe('SessionTape reconciliation and facts', () => {
       expect(transcript.applied).toEqual([])
     })
 
+    it('projects Tape messages the transcript lacks before writing the first cursor', () => {
+      const { service, transcript, table } = createReconcileHarness([])
+      appendMessageRecordToTape(
+        table as any,
+        createRecord({ id: 'tape-only', orderSeq: 1 }),
+        'live'
+      )
+
+      const result = service.ensureSessionTapeReady('s1', transcript as any)
+
+      expect(transcript.applied.map((row) => [row.kind, row.source_id])).toEqual([
+        ['message', 'tape-only']
+      ])
+      expect(result.historyRecords.map((record) => record.id)).toEqual(['tape-only'])
+      expect(transcript.cursor!.maxEntryId).toBe(table.getMaxEntryId('s1'))
+    })
+
     it('does not delete a transcript row the backfill did not find a fact for', () => {
       // The upgrade case: rows written before the projection existed, Tape behind or empty.
       const { service, transcript } = createReconcileHarness([

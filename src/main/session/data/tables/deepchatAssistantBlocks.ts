@@ -79,7 +79,15 @@ export class DeepChatAssistantBlocksTable extends BaseTable {
     return NORMALIZATION_SCHEMA_VERSION
   }
 
-  replaceForMessage(messageId: string, blocks: AssistantMessageBlock[]): void {
+  /**
+   * `updatedAt` is what a block without its own timestamp reports back; the projection passes the
+   * record's time so replaying a fact reproduces the rows it wrote the first time.
+   */
+  replaceForMessage(
+    messageId: string,
+    blocks: AssistantMessageBlock[],
+    updatedAt: number = Date.now()
+  ): void {
     const insert = this.db.prepare(
       `INSERT INTO deepchat_assistant_blocks (
         message_id,
@@ -102,7 +110,6 @@ export class DeepChatAssistantBlocksTable extends BaseTable {
 
     this.db.transaction(() => {
       this.delete(messageId)
-      const updatedAt = Date.now()
       blocks.forEach((block, index) => {
         const row = toAssistantBlockRowInput(block, updatedAt)
         insert.run(

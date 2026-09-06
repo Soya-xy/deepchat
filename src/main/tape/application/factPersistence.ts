@@ -131,7 +131,13 @@ function buildMessageProvenanceKey(
   return `message:${record.id}:revision:${record.status}:${record.updatedAt}`
 }
 
-const MESSAGE_RECORD_DIVERGENCE_FIELDS = ['content', 'status', 'orderSeq', 'metadata'] as const
+const MESSAGE_RECORD_DIVERGENCE_FIELDS = [
+  'content',
+  'status',
+  'orderSeq',
+  'metadata',
+  'isContextEdge'
+] as const
 
 /**
  * A sent record's live or backfill fact is keyed by message id alone, so the store returns the

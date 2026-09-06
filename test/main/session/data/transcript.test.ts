@@ -562,7 +562,8 @@ describe('SessionTranscript', () => {
 
       expect(sqlitePresenter.deepchatAssistantBlocksTable.replaceForMessage).toHaveBeenCalledWith(
         'm1',
-        blocks
+        blocks,
+        expect.any(Number)
       )
       expect(sqlitePresenter.deepchatMessagesTable.upsert).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -691,7 +692,8 @@ describe('SessionTranscript', () => {
 
       expect(sqlitePresenter.deepchatAssistantBlocksTable.replaceForMessage).toHaveBeenCalledWith(
         'm1',
-        blocks
+        blocks,
+        expect.any(Number)
       )
       // Without new metadata the row keeps what it had.
       expect(sqlitePresenter.deepchatMessagesTable.upsert).toHaveBeenCalledWith(
@@ -716,7 +718,8 @@ describe('SessionTranscript', () => {
 
       expect(sqlitePresenter.deepchatAssistantBlocksTable.replaceForMessage).toHaveBeenCalledWith(
         'm1',
-        blocks
+        blocks,
+        expect.any(Number)
       )
       expect(sqlitePresenter.deepchatMessagesTable.upsert).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -1502,7 +1505,8 @@ describe('SessionTranscript', () => {
       )
       expect(sqlitePresenter.deepchatAssistantBlocksTable.replaceForMessage).toHaveBeenCalledWith(
         'm2',
-        expect.any(Array)
+        expect.any(Array),
+        expect.any(Number)
       )
       const {
         id: messageId,
@@ -1686,7 +1690,8 @@ describe('SessionTranscript', () => {
       expect(store.recoverPendingMessages()).toBe(1)
       expect(sqlitePresenter.deepchatAssistantBlocksTable.replaceForMessage).toHaveBeenCalledWith(
         'm3',
-        expect.any(Array)
+        expect.any(Array),
+        expect.any(Number)
       )
       const {
         id: messageId,

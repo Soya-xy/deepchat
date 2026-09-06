@@ -139,6 +139,8 @@ export class DeepChatMessagesTable extends BaseTable {
   /**
    * Writes the whole row from a terminal message record. The record is authoritative for every
    * column, including `created_at`, so a replayed fact reproduces the row it was appended from.
+   * A row never moves between Sessions: an id that already belongs to another Session is refused,
+   * the way `insert` refused the duplicate key.
    */
   upsert(row: {
     id: string
@@ -152,7 +154,7 @@ export class DeepChatMessagesTable extends BaseTable {
     createdAt: number
     updatedAt: number
   }): void {
-    this.db
+    const result = this.db
       .prepare(
         `INSERT INTO deepchat_messages (
            id,
@@ -168,7 +170,6 @@ export class DeepChatMessagesTable extends BaseTable {
          )
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
-           session_id = excluded.session_id,
            order_seq = excluded.order_seq,
            role = excluded.role,
            content = excluded.content,
@@ -176,7 +177,8 @@ export class DeepChatMessagesTable extends BaseTable {
            is_context_edge = excluded.is_context_edge,
            metadata = excluded.metadata,
            created_at = excluded.created_at,
-           updated_at = excluded.updated_at`
+           updated_at = excluded.updated_at
+         WHERE deepchat_messages.session_id = excluded.session_id`
       )
       .run(
         row.id,
@@ -190,6 +192,9 @@ export class DeepChatMessagesTable extends BaseTable {
         row.createdAt,
         row.updatedAt
       )
+    if (result.changes === 0) {
+      throw new Error(`Message ${row.id} belongs to another session; refusing to move it.`)
+    }
   }
 
   updateContent(messageId: string, content: string): void {
@@ -472,11 +477,12 @@ export class DeepChatMessagesTable extends BaseTable {
   }
 
   deleteByIds(messageIds: string[]): void {
-    if (messageIds.length === 0) return
-    const placeholders = messageIds.map(() => '?').join(', ')
-    this.db
-      .prepare(`DELETE FROM deepchat_messages WHERE id IN (${placeholders})`)
-      .run(...messageIds)
+    // Chunked below SQLite's bound-variable floor; a range delete can hand over a whole Session.
+    for (let offset = 0; offset < messageIds.length; offset += 500) {
+      const chunk = messageIds.slice(offset, offset + 500)
+      const placeholders = chunk.map(() => '?').join(', ')
+      this.db.prepare(`DELETE FROM deepchat_messages WHERE id IN (${placeholders})`).run(...chunk)
+    }
   }
 
   deleteFromOrderSeq(sessionId: string, fromOrderSeq: number): void {

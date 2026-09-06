@@ -71,6 +71,12 @@ function createMockSqlitePresenter() {
   let tapeIncarnationSequence = 0
   let messagesList: any[] = []
 
+  const sessionMaxEntryId = (sessionId: string) =>
+    tapeEntries.reduce(
+      (maxEntryId, entry) =>
+        entry.session_id === sessionId ? Math.max(maxEntryId, entry.entry_id) : maxEntryId,
+      0
+    )
   const tapeTable = {
     runInTransaction: vi.fn((operation: () => unknown) => operation()),
     isInTransaction: vi.fn(() => false),
@@ -99,9 +105,10 @@ function createMockSqlitePresenter() {
         )
         if (existing) return existing
       }
+      // Entry ids are per Session, like the store: the Session's current maximum plus one.
       const row = {
         session_id: input.sessionId,
-        entry_id: tapeEntries.length + 1,
+        entry_id: sessionMaxEntryId(input.sessionId) + 1,
         kind: input.kind,
         name: input.name ?? null,
         source_type: input.source?.type ?? null,
@@ -249,9 +256,7 @@ function createMockSqlitePresenter() {
             .map((entry) => entry.source_seq)
         )
     ),
-    getMaxEntryId: vi.fn(
-      (sessionId: string) => tapeEntries.filter((entry) => entry.session_id === sessionId).length
-    ),
+    getMaxEntryId: vi.fn((sessionId: string) => sessionMaxEntryId(sessionId)),
     getLatestAnchor: vi.fn().mockReturnValue(undefined),
     getLatestSummaryAnchor: vi.fn().mockReturnValue(undefined),
     getLatestReconstructionAnchor: vi.fn().mockReturnValue(undefined),

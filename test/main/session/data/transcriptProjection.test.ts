@@ -77,7 +77,7 @@ describeIfSqlite('SessionTranscript follows the Tape through the projection curs
   })
 
   it('materializes message facts that reached the Tape behind the transcript', () => {
-    const { connection, tape, transcript, cursor, head } = createSession()
+    const { connection, database, tape, transcript, cursor, head } = createSession()
     try {
       const userId = transcript.createUserMessage('s1', 1, userContent)
       tape.ensureSessionTapeReady('s1', transcript)
@@ -116,6 +116,26 @@ describeIfSqlite('SessionTranscript follows the Tape through the projection curs
       tape.ensureSessionTapeReady('s1', transcript)
       expect(transcript.getMessage(userId)).toBeNull()
       expect(transcript.getMessages('s1').map((record) => record.id)).toEqual(['direct-1'])
+
+      // Without a cursor the backfill branch runs; a fact the transcript never held still lands,
+      // and a block that carries no timestamp reports the record's time, not the replay's.
+      database.deepchatTranscriptProjectionMetaTable.delete('s1')
+      tape.appendMessageRecord({
+        ...direct,
+        id: 'direct-2',
+        orderSeq: 3,
+        content: JSON.stringify([{ type: 'content', content: 'later', status: 'success' }]),
+        createdAt: 600,
+        updatedAt: 600
+      })
+      const ready = tape.ensureSessionTapeReady('s1', transcript)
+      expect(ready.historyRecords.map((record) => record.id)).toEqual(['direct-1', 'direct-2'])
+      expect(transcript.getMessages('s1').map((record) => record.id)).toEqual([
+        'direct-1',
+        'direct-2'
+      ])
+      expect(JSON.parse(transcript.getMessage('direct-2')!.content)[0].timestamp).toBe(600)
+      expect(cursor()).toEqual(head())
     } finally {
       connection.close()
     }
@@ -156,6 +176,31 @@ describeIfSqlite('SessionTranscript follows the Tape through the projection curs
 
       const again = tape.ensureSessionTapeReady('s1', transcript)
       expect(again.appendedFactCount).toBe(0)
+    } finally {
+      connection.close()
+    }
+  })
+
+  it('refuses to move a message row to another Session on an id collision', () => {
+    const { connection, database, transcript } = createSession()
+    try {
+      const id = transcript.createUserMessage('s1', 1, userContent)
+      const row = database.deepchatMessagesTable.get(id)!
+      expect(() =>
+        database.deepchatMessagesTable.upsert({
+          id,
+          sessionId: 's2',
+          orderSeq: 1,
+          role: 'user',
+          content: row.content,
+          status: 'sent',
+          isContextEdge: 0,
+          metadata: '{}',
+          createdAt: row.created_at,
+          updatedAt: row.updated_at
+        })
+      ).toThrow('belongs to another session')
+      expect(database.deepchatMessagesTable.get(id)?.session_id).toBe('s1')
     } finally {
       connection.close()
     }

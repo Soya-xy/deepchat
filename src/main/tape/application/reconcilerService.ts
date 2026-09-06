@@ -5,6 +5,8 @@ import type {
   TapeProjectionCursor,
   TapeTranscriptProjection
 } from '../ports/capabilities'
+import { tapeEntryToMessageRecord } from '../domain/effectiveSemantics'
+import { buildEffectiveTapeView } from '../domain/effectiveView'
 import { appendMessageRecordToTape, buildTapeToolRevisionIndex } from './factPersistence'
 import type { TapeFactService } from './factService'
 import { migrationProvenanceKey } from './common'
@@ -29,7 +31,9 @@ function legacySummaryProvenanceKey(sessionId: string): string {
  *
  * A Session without a cursor predates the projection or lost its Tape to a reset. Its transcript
  * is the only complete record, so it is backfilled into the Tape once, the way the reconciler
- * always did, and the cursor is written at the head that backfill reached. Nothing here reads the
+ * always did. Before the cursor is written at the head that backfill reached, any effective Tape
+ * message the transcript does not hold is projected the other way, so a fact that entered the Tape
+ * without going through the transcript is not declared aligned unseen. Nothing here reads the
  * transcript otherwise.
  */
 export class TapeReconcilerService {
@@ -97,6 +101,7 @@ export class TapeReconcilerService {
     }
 
     this.backfillLegacySummaryAnchor(sessionId, historyRecords)
+    this.projectTapeOnlyMessages(sessionId, transcript, historyRecords)
 
     table.appendEvent({
       sessionId,
@@ -126,6 +131,32 @@ export class TapeReconcilerService {
       })
     }
     return appendedFactCount
+  }
+
+  /**
+   * The backfill above made the Tape a superset of the transcript. The cursor it is about to write
+   * claims the reverse as well, so the effective Tape messages the transcript lacks are projected
+   * first. Ordinarily there are none; every message fact comes from the transcript or from this
+   * backfill.
+   */
+  private projectTapeOnlyMessages(
+    sessionId: string,
+    transcript: TapeTranscriptProjection,
+    transcriptRecords: readonly ChatMessageRecord[]
+  ): void {
+    const transcriptIds = new Set(transcriptRecords.map((record) => record.id))
+    const tapeOnlyRows = buildEffectiveTapeView(
+      this.table.getEffectiveMessageInputRows(sessionId),
+      {
+        includePending: true
+      }
+    ).rows.filter((row) => {
+      const record = tapeEntryToMessageRecord(row)
+      return record !== null && !transcriptIds.has(record.id)
+    })
+    if (tapeOnlyRows.length > 0) {
+      transcript.applyTapeEntries(tapeOnlyRows)
+    }
   }
 
   private backfillLegacySummaryAnchor(

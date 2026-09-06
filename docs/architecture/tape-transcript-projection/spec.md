@@ -156,11 +156,13 @@ the Tape reset; the legacy import overwrite clears it with the other legacy-owne
 `ensureSessionTapeReady(sessionId)` becomes:
 
 1. Read `(tape incarnation, tape max entry id)` and the meta row in one query.
-2. If the meta row is absent and the transcript has rows: run the existing legacy backfill
-   (transcript to Tape, idempotent, `source: 'backfill'`), append the `migration/backfill` event as
-   today, then write the meta row. This is the upgrade path for Sessions whose Tape fell behind
-   before this change (a fork, import or recovery that was never followed by a turn), and it is what
-   keeps the applier from ever replaying an empty Tape over a populated transcript.
+2. If the meta row is absent: run the existing legacy backfill (transcript to Tape, idempotent,
+   `source: 'backfill'`), then project the other way any effective Tape message whose id the
+   transcript does not hold, append the `migration/backfill` event as today, and write the meta row.
+   The backfill is the upgrade path for Sessions whose Tape fell behind before this change (a fork,
+   import or recovery that was never followed by a turn) and keeps the applier from replaying an
+   empty Tape over a populated transcript; the reverse projection keeps the cursor honest for a fact
+   that entered the Tape without going through the transcript, which no path produces today.
 3. If the meta row exists but its incarnation differs from the Tape's: the Tape was reset under the
    transcript. Treat the row as absent and run step 2, which overwrites it.
 4. If `max_entry_id` is behind the Tape head: `replay(sessionId, max_entry_id)`, then advance the
@@ -181,9 +183,10 @@ records through `TapeProjectionHeadReader.getProjectionHead`.
 
 `appendMessageRecordToTape` compares the row the store returned with the record it tried to
 append whenever the provenance key was derived and the append is live (a `sent` record written by
-the transcript, including fork, import and recovery). If `content`, `status`, `orderSeq` or
-`metadata` differ, it logs one warning with the session id, message id, source and the names of the
-differing fields. Payload text is never logged. Backfill appends do not report: a backfill of an
+the transcript, including fork, import and recovery). If `content`, `status`, `orderSeq`,
+`metadata` or `isContextEdge` differ, it logs one warning with the session id, message id and the
+names of the differing fields. `sessionId` and `id` are not compared: the derived key is scoped to
+both, so a hit already proves they match. Payload text is never logged. Backfill appends do not report: a backfill of an
 old Session compares today's materialized content with a fact written by an earlier version, and
 that is format history, not a bypassed write. The append result is unchanged; the guard only makes
 a divergence visible.
@@ -205,8 +208,9 @@ import the applier.
 ## Compatibility
 
 - No Tape schema, fact name, provenance key, hash version or payload field changes. Records written
-  fact-first serialize to the same `payload.record` shape as records read back from the tables did;
-  `traceCount` is `0`, which is what the live read-back reported as well.
+  fact-first serialize to the same `payload.record` shape as records read back from the tables did.
+  `traceCount` is pinned to `0`; the previous read-back carried a snapshot that could be above zero
+  when request tracing was enabled. No reader takes `traceCount` from a Tape record.
 - Rollback is a code revert. The meta table is ignored by earlier code; the earlier reconciler's
   backfill finds every fact already present through provenance keys and appends nothing.
 - `SessionTranscript`'s public method signatures are unchanged. `TapeBackfillResult` is unchanged.

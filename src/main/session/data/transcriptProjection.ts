@@ -43,6 +43,12 @@ export class TranscriptProjectionApplier {
       const content = parseUserContent(record.content)
       if (content) {
         this.persistUserContent(record.id, content)
+      } else {
+        // Nothing structured to derive: drop what an earlier record left so the read path falls
+        // back to the content column instead of showing the previous message.
+        this.database.deepchatUserMessageLinksTable.deleteByMessageIds([record.id])
+        this.database.deepchatUserMessageFilesTable.deleteByMessageIds([record.id])
+        this.database.deepchatUserMessagesTable.deleteByMessageIds([record.id])
       }
       this.upsertSearchDocument(record)
       return
@@ -50,7 +56,8 @@ export class TranscriptProjectionApplier {
 
     this.database.deepchatAssistantBlocksTable.replaceForMessage(
       record.id,
-      parseAssistantBlocks(record.content)
+      parseAssistantBlocks(record.content),
+      record.updatedAt
     )
     if (record.status !== 'pending') {
       this.upsertSearchDocument(record)

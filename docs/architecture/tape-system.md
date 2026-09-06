@@ -385,8 +385,8 @@ authority。
 - Context Tape 写失败按当前 settlement policy 记录/隔离，不能把已经完成的用户回复变成无限挂起；同事务
   的 fact append 失败会连带回滚 transcript 写入；
 - readiness 以投影游标比对 Tape head：游标缺失或 incarnation 不匹配时把 transcript 一次性回填进 Context
-  Tape 并建立游标，否则只重放游标之后的 message fact 与 retraction；classifier 只读取原生
-  `execution/*` v1 events，二者不得互相伪造；
+  Tape、把 Tape 中 transcript 没有的有效消息投影回表，再建立游标；否则只重放游标之后的 message fact 与
+  retraction。classifier 只读取原生 `execution/*` v1 events，二者不得互相伪造；
 - replay 从 manifest 和 facts 重建 provider-visible context，不从 renderer block 猜测执行语义。
 
 ## Model capability
