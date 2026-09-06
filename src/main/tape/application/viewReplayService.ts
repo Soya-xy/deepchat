@@ -4,12 +4,6 @@ import type {
   DeepChatTapeViewManifestV6,
   DeepChatTapeViewManifestV7
 } from '@shared/types/tape-view-manifest'
-import type {
-  DeepChatTapeReplayEntrySnapshot,
-  DeepChatTapeReplayExportOptions,
-  DeepChatTapeReplaySlice,
-  DeepChatTapeReplayTraceSnapshot
-} from '@shared/types/tape-replay'
 import { SUMMARY_ANCHOR_NAMES, type DeepChatTapeEntryRow } from '../domain/entry'
 import { buildEffectiveTapeView } from '../domain/effectiveView'
 import {
@@ -21,20 +15,12 @@ import {
   collectEntryIds,
   hashString,
   isPositiveInteger,
-  normalizeStoredTapeViewManifest,
-  withReplaySliceHash
+  normalizeStoredTapeViewManifest
 } from '../domain/replay'
 import { canonicalJsonStringifyData, hashJsonData } from '../domain/canonicalJson'
 import { readTapeSkillMaterializationRef } from '../domain/skillMaterialization'
-import {
-  hashJson,
-  TAPE_VIEW_MANIFEST_EVENT_NAME,
-  verifyTapeViewManifestHash
-} from '../domain/viewManifest'
-import type {
-  TapeApplicationProviders,
-  TapeMessageTraceRow as DeepChatMessageTraceRow
-} from '../ports/application'
+import { TAPE_VIEW_MANIFEST_EVENT_NAME, verifyTapeViewManifestHash } from '../domain/viewManifest'
+import type { TapeApplicationProviders } from '../ports/application'
 import { toTapeSessionId } from '../domain/facts'
 import {
   MAX_SKILL_VIEW_RESULT_FACT_BYTES,
@@ -57,10 +43,7 @@ import { parseJsonObject } from './common'
 import { assertTapeToolFactPhysicalEnvelope, buildToolFactProvenanceKey } from './factPersistence'
 import type { TapeViewManifestAssemblySources } from './contracts'
 
-type TapeViewReplayProviders = Pick<
-  TapeApplicationProviders,
-  'getEntryStore' | 'getMessageTraceReader'
->
+type TapeViewReplayProviders = Pick<TapeApplicationProviders, 'getEntryStore'>
 
 const BOOTSTRAP_ANCHOR_NAME = 'session/start'
 
@@ -1114,116 +1097,6 @@ export class TapeViewReplayService {
     return exact
   }
 
-  exportReplaySlice(
-    sessionId: string,
-    messageId: string,
-    options: DeepChatTapeReplayExportOptions = {}
-  ): DeepChatTapeReplaySlice | null {
-    if (options.requestSeq !== undefined && !isPositiveInteger(options.requestSeq)) {
-      throw new Error('requestSeq must be a positive integer.')
-    }
-
-    const manifests = this.listViewManifestsByMessage(sessionId, messageId)
-    const manifestRecord =
-      options.requestSeq === undefined
-        ? manifests[0]
-        : manifests.find((record) => record.requestSeq === options.requestSeq)
-    if (!manifestRecord) {
-      return null
-    }
-
-    return this.buildReplaySlice(sessionId, messageId, manifestRecord, options)
-  }
-
-  private buildReplaySlice(
-    sessionId: string,
-    messageId: string,
-    manifestRecord: DeepChatTapeViewManifestRecord,
-    options: DeepChatTapeReplayExportOptions
-  ): DeepChatTapeReplaySlice {
-    const table = this.table
-    const manifest = manifestRecord.manifest
-    const includedEntryIds = collectEntryIds(manifest.included.map((ref) => ref.entryId))
-    const excludedEntryIds = collectEntryIds(manifest.excluded.map((ref) => ref.entryId))
-    const contributionSourceEntryIds = collectEntryIds(
-      manifest.included.flatMap((ref) => ref.sourceEntryIds ?? [])
-    )
-    const skillContextEntryIds =
-      manifest.schemaVersion === 6 || manifest.schemaVersion === 7
-        ? collectEntryIds(
-            manifest.skillContexts.flatMap((context) => [
-              context.authoritativeRef.entryId,
-              ...('executionRef' in context ? [context.executionRef.entryId] : []),
-              ...context.sourceEntryIds
-            ])
-          )
-        : []
-    const anchorEntryIds = collectEntryIds([
-      ...manifest.anchorEntryIds,
-      ...contributionSourceEntryIds
-    ])
-    const selectedEntryIds = new Set([
-      manifestRecord.entryId,
-      ...includedEntryIds,
-      ...excludedEntryIds,
-      ...anchorEntryIds,
-      ...skillContextEntryIds
-    ])
-    const selectedRows = table.getByEntryIds(sessionId, [...selectedEntryIds])
-    const entries = selectedRows.map((row) =>
-      this.toReplayEntrySnapshot(row, options.includeTapePayloads === true)
-    )
-    const foundEntryIds = new Set(entries.map((entry) => entry.entryId))
-    let skillEvidenceValid = skillContextEntryIds.every((entryId) => foundEntryIds.has(entryId))
-    if (skillEvidenceValid && (manifest.schemaVersion === 6 || manifest.schemaVersion === 7)) {
-      try {
-        const manifestRow = selectedRows.find((row) => row.entry_id === manifestRecord.entryId)
-        if (!manifestRow) throw new Error('Skill-bearing ViewManifest occurrence is missing.')
-        this.requireValidStoredSkillManifestOccurrence(manifestRow, manifest)
-      } catch {
-        skillEvidenceValid = false
-      }
-    }
-
-    const trace = this.findReplayTrace(sessionId, messageId, manifestRecord.requestSeq)
-    const createdAt = Date.now()
-    const sliceBase: Omit<DeepChatTapeReplaySlice, 'hashes'> & {
-      hashes: Omit<DeepChatTapeReplaySlice['hashes'], 'sliceHash'> & { sliceHash: '' }
-    } = {
-      schemaVersion: 1 as const,
-      sliceId: `replay_${hashJson({
-        sessionId,
-        messageId,
-        requestSeq: manifestRecord.requestSeq,
-        manifestHash: manifest.hashes.manifestHash
-      }).slice(0, 16)}`,
-      sessionId,
-      messageId,
-      requestSeq: manifestRecord.requestSeq,
-      mode: trace ? 'trace_bound' : 'manifest_only',
-      manifestRecord,
-      trace: trace ? this.toReplayTraceSnapshot(trace, options.includeTracePayload === true) : null,
-      entries,
-      refs: {
-        manifestEntryId: manifestRecord.entryId,
-        includedEntryIds,
-        excludedEntryIds,
-        anchorEntryIds,
-        ...(manifest.schemaVersion === 6 || manifest.schemaVersion === 7
-          ? { skillContextEntryIds }
-          : {})
-      },
-      hashes: {
-        manifestHash: manifest.hashes.manifestHash,
-        sliceHash: ''
-      },
-      integrity: skillEvidenceValid ? manifestRecord.integrity : 'invalid',
-      createdAt
-    }
-
-    return withReplaySliceHash(sliceBase)
-  }
-
   private toViewManifestRecord(row: DeepChatTapeEntryRow): DeepChatTapeViewManifestRecord | null {
     const payload = parseJsonObject(row.payload_json)
     const data = payload.data
@@ -1249,82 +1122,5 @@ export class TapeViewReplayService {
       integrity: verifyTapeViewManifestHash(manifest),
       manifest
     }
-  }
-
-  private findReplayTrace(
-    sessionId: string,
-    messageId: string,
-    requestSeq: number
-  ): DeepChatMessageTraceRow | null {
-    const traceTable = this.providers.getMessageTraceReader()
-    return this.selectLatestTrace(traceTable.listByMessageId(messageId), sessionId, requestSeq)
-  }
-
-  private selectLatestTrace(
-    rows: DeepChatMessageTraceRow[],
-    sessionId: string,
-    requestSeq: number
-  ): DeepChatMessageTraceRow | null {
-    return (
-      rows
-        .filter((row) => row.session_id === sessionId && row.request_seq === requestSeq)
-        .toSorted(
-          (left, right) =>
-            (right.physical_attempt ?? 0) - (left.physical_attempt ?? 0) ||
-            right.created_at - left.created_at ||
-            right.id.localeCompare(left.id)
-        )[0] ?? null
-    )
-  }
-
-  private toReplayEntrySnapshot(
-    row: DeepChatTapeEntryRow,
-    includePayloads: boolean
-  ): DeepChatTapeReplayEntrySnapshot {
-    const snapshot: DeepChatTapeReplayEntrySnapshot = {
-      entryId: row.entry_id,
-      kind: row.kind,
-      name: row.name,
-      sourceType: row.source_type,
-      sourceId: row.source_id,
-      sourceSeq: row.source_seq,
-      provenanceKey: row.provenance_key,
-      payloadHash: hashString(row.payload_json),
-      metaHash: hashString(row.meta_json),
-      createdAt: row.created_at
-    }
-
-    if (includePayloads && row.kind !== 'context') {
-      snapshot.payload = parseJsonObject(row.payload_json)
-      snapshot.meta = parseJsonObject(row.meta_json)
-    }
-
-    return snapshot
-  }
-
-  private toReplayTraceSnapshot(
-    row: DeepChatMessageTraceRow,
-    includePayload: boolean
-  ): DeepChatTapeReplayTraceSnapshot {
-    const snapshot: DeepChatTapeReplayTraceSnapshot = {
-      id: row.id,
-      requestSeq: row.request_seq,
-      logicalRound: row.logical_round,
-      physicalAttempt: row.physical_attempt,
-      providerId: row.provider_id,
-      modelId: row.model_id,
-      endpoint: row.endpoint,
-      headersHash: hashString(row.headers_json),
-      bodyHash: hashString(row.body_json),
-      truncated: row.truncated === 1,
-      createdAt: row.created_at
-    }
-
-    if (includePayload) {
-      snapshot.headersJson = row.headers_json
-      snapshot.bodyJson = row.body_json
-    }
-
-    return snapshot
   }
 }

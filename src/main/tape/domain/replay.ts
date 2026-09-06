@@ -3,9 +3,7 @@ import type {
   DeepChatTapeViewExcludedRange,
   DeepChatTapeViewManifest
 } from '@shared/types/tape-view-manifest'
-import type { DeepChatTapeReplaySlice } from '@shared/types/tape-replay'
 import { isDeepChatExecutionContract } from './executionContract'
-import { hashJson } from './viewManifest'
 import { validateSchema6SkillContexts, validateSchema7SkillContexts } from './skillContext'
 import { isBoundedSkillTapeIdentity } from './skillIdentity'
 import { isRecordObject, SHA256_HEX_PATTERN } from './primitives'
@@ -300,21 +298,4 @@ export function collectEntryIds(values: Array<number | null>): number[] {
   return [...new Set(values.filter((value): value is number => typeof value === 'number'))].sort(
     (left, right) => left - right
   )
-}
-
-export function withReplaySliceHash(
-  slice: Omit<DeepChatTapeReplaySlice, 'hashes'> & {
-    hashes: Omit<DeepChatTapeReplaySlice['hashes'], 'sliceHash'> & { sliceHash: '' }
-  }
-): DeepChatTapeReplaySlice {
-  const sliceForHash = { ...slice } as Partial<DeepChatTapeReplaySlice>
-  delete sliceForHash.createdAt
-  delete sliceForHash.integrity
-  return {
-    ...slice,
-    hashes: {
-      ...slice.hashes,
-      sliceHash: hashJson(sliceForHash)
-    }
-  }
 }

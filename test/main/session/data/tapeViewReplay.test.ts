@@ -20,7 +20,6 @@ import {
   createTapeTableMock,
   createRecord,
   createTranscriptProjectionMock,
-  createTraceRow,
   createObservationManifest,
   createTapeService
 } from './tapeTestHarness'
@@ -509,28 +508,10 @@ describe('SessionTape view and replay', () => {
     ).toThrow(/Conflicting Skill-bearing ViewManifest binding/)
     expect(entries.filter((entry) => entry.name === 'view/assembled')).toHaveLength(1)
 
-    table.getBySession.mockClear()
-    table.getViewManifestEventsByMessage.mockClear()
-    const replay = service.exportReplaySlice('s1', 'a1', {
-      requestSeq: 2,
-      includeTapePayloads: true
-    })
-    expect(table.getBySession).not.toHaveBeenCalled()
-    expect(table.getViewManifestEventsByMessage).toHaveBeenCalledWith('s1', 'a1')
-    expect(replay?.integrity).toBe('valid')
-    expect(replay?.refs.skillContextEntryIds).toEqual([sourceRow.entry_id, receipt.entryId])
-    const materializationSnapshot = replay?.entries.find(
-      (entry) => entry.entryId === receipt.entryId
-    )
-    expect(materializationSnapshot).toBeDefined()
-    expect(materializationSnapshot).not.toHaveProperty('payload')
-    expect(JSON.stringify(replay)).not.toContain(effectiveContent)
-
     entries.find((entry) => entry.entry_id === receipt.entryId)!.payload_json = '{}'
     expect(() => service.assertSkillRequestAuthority(authority)).toThrow(
       /materialization|authority|corrupt/i
     )
-    expect(service.exportReplaySlice('s1', 'a1', { requestSeq: 2 })?.integrity).toBe('invalid')
   })
 
   it('validates runtime Skill-view tool-result evidence and physical manifest identity', () => {
@@ -612,29 +593,25 @@ describe('SessionTape view and replay', () => {
       assembledAt: 300
     })
     const manifestRow = service.appendViewManifest(manifest)
+    const readExecutionBinding = () =>
+      service.getViewManifestByExecutionBinding({ sessionId: 's1', runId: 'run-2', requestSeq: 3 })
     manifestRow.source_type = 'message'
 
-    expect(() =>
-      service.getViewManifestByExecutionBinding({
-        sessionId: 's1',
-        runId: 'run-2',
-        requestSeq: 3
-      })
-    ).toThrow(/physical envelope is corrupt/)
+    expect(readExecutionBinding).toThrow(/physical envelope is corrupt/)
     manifestRow.source_type = 'runtime_event'
 
     const provenanceKey = manifestRow.provenance_key
     manifestRow.provenance_key = 'wrong-binding'
-    expect(service.exportReplaySlice('s1', 'a1', { requestSeq: 3 })?.integrity).toBe('invalid')
+    expect(readExecutionBinding()).toBeNull()
     manifestRow.provenance_key = provenanceKey
 
     const metadata = manifestRow.meta_json
     manifestRow.meta_json = '{}'
-    expect(service.exportReplaySlice('s1', 'a1', { requestSeq: 3 })?.integrity).toBe('invalid')
+    expect(readExecutionBinding).toThrow(/physical envelope is corrupt/)
     manifestRow.meta_json = metadata
 
     manifestRow.created_at += 1
-    expect(service.exportReplaySlice('s1', 'a1', { requestSeq: 3 })?.integrity).toBe('invalid')
+    expect(readExecutionBinding).toThrow(/physical envelope is corrupt/)
     manifestRow.created_at -= 1
 
     const toolResultMetadata = toolResult.meta_json
@@ -654,7 +631,7 @@ describe('SessionTape view and replay', () => {
 
     const bootstrap = entries.find((entry) => entry.name === 'session/start')!
     bootstrap.meta_json = JSON.stringify({ tapeIncarnationId: 'replacement-incarnation' })
-    expect(service.exportReplaySlice('s1', 'a1', { requestSeq: 3 })?.integrity).toBe('invalid')
+    expect(readExecutionBinding()).toBeNull()
     bootstrap.meta_json = JSON.stringify({ tapeIncarnationId })
 
     entries.find((entry) => entry.entry_id === toolResult.entry_id)!.payload_json = JSON.stringify({
@@ -835,12 +812,6 @@ describe('SessionTape view and replay', () => {
         runId: 'run-2'
       })?.entryId
     ).toBe(manifestRow.entry_id)
-    const replay = service.exportReplaySlice('s1', 'a1', { requestSeq: 3 })
-    expect(replay?.integrity).toBe('valid')
-    expect(replay?.refs.skillContextEntryIds).toEqual(
-      expect.arrayContaining([toolResultReceipt.entryId, materializationReceipt.entryId])
-    )
-
     const legacyManifest = createTapeViewManifest({
       ...input,
       skillContexts: [
@@ -882,7 +853,9 @@ describe('SessionTape view and replay', () => {
     ).toThrow(/Skill-bearing ViewManifest Run occurrence is corrupt/i)
 
     entries.find((entry) => entry.entry_id === materializationReceipt.entryId)!.payload_json = '{}'
-    expect(service.exportReplaySlice('s1', 'a1', { requestSeq: 3 })?.integrity).toBe('invalid')
+    expect(() =>
+      service.getViewManifestByExecutionBinding({ sessionId: 's1', runId: 'run-2', requestSeq: 3 })
+    ).toThrow(/materialization payload/)
   })
 
   it('stores and lists view manifests as idempotent tape events', () => {
@@ -1197,72 +1170,6 @@ describe('SessionTape view and replay', () => {
     )
   })
 
-  it('exports tool_call and tool_result entries in a tool-loop replay slice', () => {
-    const { table } = createTapeTableMock()
-    const assistantRecord = createRecord({
-      id: 'a1',
-      orderSeq: 2,
-      role: 'assistant',
-      content: JSON.stringify([
-        {
-          type: 'tool_call',
-          status: 'success',
-          timestamp: 120,
-          tool_call: { id: 'tc1', name: 'search', params: '{"q":"x"}', response: 'result' }
-        }
-      ])
-    })
-    appendToolFactsToTape(table as any, assistantRecord, 'live', 'tool_loop')
-
-    const service = createTapeService(table)
-    const sourceMaps = service.getViewManifestSourceMaps('s1')
-    const messages = [
-      { role: 'system' as const, content: 'system' },
-      {
-        role: 'assistant' as const,
-        content: '',
-        tool_calls: [
-          { id: 'tc1', type: 'function' as const, function: { name: 'search', arguments: '{}' } }
-        ]
-      },
-      { role: 'tool' as const, content: 'result', tool_call_id: 'tc1' }
-    ]
-    const manifest = createTapeViewManifest({
-      sessionId: 's1',
-      messageId: 'a1',
-      requestSeq: 2,
-      taskType: 'tool_loop',
-      policy: 'tool_loop_shadow',
-      policyVersion: 1,
-      messages,
-      tools: [],
-      latestEntryId: sourceMaps.latestEntryId,
-      anchorEntryIds: sourceMaps.anchorEntryIds,
-      included: buildRequestRefs(messages, sourceMaps),
-      excluded: [],
-      tokenBudget: {
-        contextLength: 1000,
-        requestedMaxTokens: 100,
-        effectiveMaxTokens: 100,
-        reserveTokens: 100,
-        toolReserveTokens: 0
-      },
-      providerId: 'openai',
-      modelId: 'gpt-4o',
-      summaryCursorOrderSeq: 1,
-      supportsVision: true,
-      supportsAudioInput: false,
-      traceDebugEnabled: false,
-      assembledAt: 200
-    })
-    service.appendViewManifest(manifest)
-
-    const slice = service.exportReplaySlice('s1', 'a1', { requestSeq: 2 })
-    const kinds = slice?.entries.map((entry) => entry.kind) ?? []
-    expect(kinds).toContain('tool_call')
-    expect(kinds).toContain('tool_result')
-  })
-
   it('filters malformed view manifest rows when listing by message', () => {
     const { table } = createTapeTableMock()
     const service = new SessionTape({
@@ -1547,396 +1454,5 @@ describe('SessionTape view and replay', () => {
     expect(sourceMaps.reconstructionAnchorEntryId).toBe(entryIdByName('compaction/manual'))
     expect(sourceMaps.reconstructionAnchorEntryIds).not.toContain(entryIdByName('memory/extract'))
     expect(sourceMaps.reconstructionAnchorEntryIds).not.toContain(entryIdByName('memory/reflect'))
-  })
-
-  it('bounds replay slices to the selected view instead of pre-cursor history', () => {
-    const { table } = createTapeTableMock()
-    const service = createTapeService(table)
-    const messageStore = createTranscriptProjectionMock([createRecord({ id: 'u1', orderSeq: 1 })])
-
-    service.ensureSessionTapeReady('s1', messageStore as any)
-    const sourceMaps = service.getViewManifestSourceMaps('s1')
-    const manifest = createTapeViewManifest({
-      sessionId: 's1',
-      messageId: 'a1',
-      requestSeq: 1,
-      taskType: 'chat',
-      policy: 'legacy_context_v1',
-      policyVersion: 1,
-      messages: [{ role: 'user' as const, content: 'hello' }],
-      tools: [],
-      latestEntryId: sourceMaps.latestEntryId,
-      anchorEntryIds: sourceMaps.reconstructionAnchorEntryIds,
-      included: [
-        {
-          entryId: sourceMaps.entryIdByMessageId.get('u1') ?? null,
-          messageId: 'u1',
-          orderSeq: 1,
-          role: 'user',
-          source: 'tape',
-          reason: 'selected_history'
-        }
-      ],
-      excluded: [],
-      summaryCursor: {
-        summaryCursorOrderSeq: 100,
-        preCursorOrderSeqMin: 1,
-        preCursorOrderSeqMax: 99,
-        preCursorCount: 99
-      },
-      tokenBudget: {
-        contextLength: 1000,
-        requestedMaxTokens: 100,
-        effectiveMaxTokens: 100,
-        reserveTokens: 100,
-        toolReserveTokens: 0
-      },
-      providerId: 'openai',
-      modelId: 'gpt-4o',
-      summaryCursorOrderSeq: 100,
-      supportsVision: true,
-      supportsAudioInput: false,
-      traceDebugEnabled: false,
-      assembledAt: 200
-    })
-    service.appendViewManifest(manifest)
-
-    const slice = service.exportReplaySlice('s1', 'a1')
-
-    expect(slice?.refs.excludedEntryIds).toEqual([])
-    expect(slice?.refs.anchorEntryIds).toEqual(sourceMaps.reconstructionAnchorEntryIds)
-    expect(slice?.refs.anchorEntryIds).toHaveLength(1)
-    expect(slice?.manifestRecord.manifest.excludedRanges).toEqual([
-      { fromOrderSeq: 1, toOrderSeq: 99, count: 99, reason: 'before_summary_cursor' }
-    ])
-    expect(slice?.entries).toHaveLength(3)
-  })
-
-  it('exports replay slices with metadata-only payloads by default', () => {
-    const { table } = createTapeTableMock()
-    const service = createTapeService(table, [createTraceRow()])
-    const messageStore = createTranscriptProjectionMock([createRecord({ id: 'u1', orderSeq: 1 })])
-
-    service.ensureSessionTapeReady('s1', messageStore as any)
-    const sourceMaps = service.getViewManifestSourceMaps('s1')
-    const manifest = createTapeViewManifest({
-      sessionId: 's1',
-      messageId: 'a1',
-      requestSeq: 1,
-      taskType: 'chat',
-      policy: 'legacy_context_v1',
-      policyVersion: 1,
-      messages: [{ role: 'user' as const, content: 'hello' }],
-      tools: [],
-      latestEntryId: sourceMaps.latestEntryId,
-      anchorEntryIds: sourceMaps.anchorEntryIds,
-      included: [
-        {
-          entryId: sourceMaps.entryIdByMessageId.get('u1') ?? null,
-          messageId: 'u1',
-          orderSeq: 1,
-          role: 'user',
-          source: 'tape',
-          reason: 'selected_history'
-        }
-      ],
-      excluded: [],
-      tokenBudget: {
-        contextLength: 1000,
-        requestedMaxTokens: 100,
-        effectiveMaxTokens: 100,
-        reserveTokens: 100,
-        toolReserveTokens: 0
-      },
-      providerId: 'openai',
-      modelId: 'gpt-4o',
-      summaryCursorOrderSeq: 1,
-      supportsVision: true,
-      supportsAudioInput: false,
-      traceDebugEnabled: true,
-      assembledAt: 200
-    })
-    const manifestEntry = service.appendViewManifest(manifest)
-
-    const nowSpy = vi.spyOn(Date, 'now').mockReturnValueOnce(1000).mockReturnValueOnce(2000)
-    const slice = service.exportReplaySlice('s1', 'a1')
-    const secondSlice = service.exportReplaySlice('s1', 'a1')
-    nowSpy.mockRestore()
-
-    expect(slice).toMatchObject({
-      schemaVersion: 1,
-      sessionId: 's1',
-      messageId: 'a1',
-      requestSeq: 1,
-      mode: 'trace_bound',
-      refs: {
-        manifestEntryId: manifestEntry.entry_id,
-        includedEntryIds: [sourceMaps.entryIdByMessageId.get('u1')],
-        anchorEntryIds: sourceMaps.anchorEntryIds
-      },
-      hashes: {
-        manifestHash: manifest.hashes.manifestHash
-      }
-    })
-    expect(slice?.hashes.sliceHash).toHaveLength(64)
-    expect(secondSlice?.hashes.sliceHash).toBe(slice?.hashes.sliceHash)
-    expect(secondSlice?.createdAt).toBe(2000)
-    expect(slice?.trace?.bodyHash).toHaveLength(64)
-    expect(slice?.trace?.bodyJson).toBeUndefined()
-    expect(slice?.entries.some((entry) => entry.entryId === manifestEntry.entry_id)).toBe(true)
-    expect(
-      slice?.entries.every((entry) => entry.payload === undefined && entry.meta === undefined)
-    ).toBe(true)
-  })
-
-  it('includes synthetic contribution source anchors in replay lineage', () => {
-    const { table } = createTapeTableMock()
-    const service = createTapeService(table)
-    table.ensureBootstrapAnchor('s1')
-    const memoryAnchor = table.appendAnchor({
-      sessionId: 's1',
-      name: 'memory/view_assembled',
-      state: { selected: [{ id: 'memory-1' }] }
-    })
-    const sourceMaps = service.getViewManifestSourceMaps('s1')
-    service.appendViewManifest(
-      createTapeViewManifest({
-        sessionId: 's1',
-        messageId: 'a1',
-        requestSeq: 1,
-        taskType: 'chat',
-        policy: 'cache_aware_context_v1',
-        policyVersion: 1,
-        contextBuilderVersion: 'cache-aware-v1',
-        messages: [{ role: 'user', content: 'memory context' }],
-        tools: [],
-        latestEntryId: sourceMaps.latestEntryId,
-        anchorEntryIds: sourceMaps.reconstructionAnchorEntryIds,
-        included: [
-          {
-            entryId: null,
-            messageId: null,
-            orderSeq: null,
-            role: 'user',
-            source: 'synthetic',
-            reason: 'memory_context',
-            sourceEntryIds: [memoryAnchor.entry_id],
-            contentHash: 'c'.repeat(64)
-          }
-        ],
-        excluded: [],
-        tokenBudget: {
-          contextLength: 1000,
-          requestedMaxTokens: 100,
-          effectiveMaxTokens: 100,
-          reserveTokens: 100,
-          toolReserveTokens: 0
-        },
-        providerId: 'openai',
-        modelId: 'gpt-4o',
-        summaryCursorOrderSeq: 1,
-        supportsVision: false,
-        supportsAudioInput: false,
-        traceDebugEnabled: false
-      })
-    )
-
-    const slice = service.exportReplaySlice('s1', 'a1')
-
-    expect(slice?.refs.anchorEntryIds).toContain(memoryAnchor.entry_id)
-    expect(slice?.entries.map((entry) => entry.entryId)).toContain(memoryAnchor.entry_id)
-  })
-
-  it('exports explicit replay request sequences with opt-in payloads', () => {
-    const { table } = createTapeTableMock()
-    const service = createTapeService(table, [
-      createTraceRow({ id: 'trace-1', request_seq: 1 }),
-      createTraceRow({
-        id: 'trace-2',
-        request_seq: 2,
-        body_json: '{"messages":[{"role":"tool","content":"done"}]}'
-      })
-    ])
-    const messageStore = createTranscriptProjectionMock([createRecord({ id: 'u1', orderSeq: 1 })])
-
-    service.ensureSessionTapeReady('s1', messageStore as any)
-    const sourceMaps = service.getViewManifestSourceMaps('s1')
-    const baseManifestInput: TapeViewManifestBuildInput = {
-      sessionId: 's1',
-      messageId: 'a1',
-      requestSeq: 1,
-      taskType: 'chat' as const,
-      policy: 'legacy_context_v1' as const,
-      policyVersion: 1,
-      messages: [{ role: 'user' as const, content: 'hello' }],
-      tools: [],
-      latestEntryId: sourceMaps.latestEntryId,
-      anchorEntryIds: sourceMaps.anchorEntryIds,
-      included: [
-        {
-          entryId: sourceMaps.entryIdByMessageId.get('u1') ?? null,
-          messageId: 'u1',
-          orderSeq: 1,
-          role: 'user',
-          source: 'tape',
-          reason: 'selected_history'
-        }
-      ],
-      excluded: [],
-      tokenBudget: {
-        contextLength: 1000,
-        requestedMaxTokens: 100,
-        effectiveMaxTokens: 100,
-        reserveTokens: 100,
-        toolReserveTokens: 0
-      },
-      providerId: 'openai',
-      modelId: 'gpt-4o',
-      summaryCursorOrderSeq: 1,
-      supportsVision: true,
-      supportsAudioInput: false,
-      traceDebugEnabled: true,
-      assembledAt: 200
-    }
-    const firstManifest = createTapeViewManifest(baseManifestInput)
-    const secondManifest = createTapeViewManifest({
-      ...baseManifestInput,
-      requestSeq: 2,
-      taskType: 'tool_loop',
-      policy: 'tool_loop_shadow',
-      policyVersion: null,
-      assembledAt: 250
-    })
-    service.appendViewManifest(firstManifest)
-    service.appendViewManifest(secondManifest)
-
-    const latest = service.exportReplaySlice('s1', 'a1')
-    const first = service.exportReplaySlice('s1', 'a1', {
-      requestSeq: 1,
-      includeTapePayloads: true,
-      includeTracePayload: true
-    })
-
-    expect(latest?.requestSeq).toBe(2)
-    expect(first?.requestSeq).toBe(1)
-    expect(first?.trace?.bodyJson).toContain('"hello"')
-    expect(first?.entries.some((entry) => entry.payload?.record)).toBe(true)
-    expect(first?.entries.some((entry) => entry.meta?.source === 'backfill')).toBe(true)
-  })
-
-  it('binds each replay slice to its own request seq, ignoring sentinel gap traces', () => {
-    const { table } = createTapeTableMock()
-    const service = createTapeService(table, [
-      createTraceRow({
-        id: 'trace-req-1',
-        request_seq: 1,
-        body_json: '{"messages":[{"role":"user","content":"first-request"}]}'
-      }),
-      createTraceRow({
-        id: 'trace-gap',
-        request_seq: 0,
-        endpoint: 'deepchat://interleaved-reasoning-gap',
-        body_json: '{"providerId":"openai"}'
-      }),
-      createTraceRow({
-        id: 'trace-req-2',
-        request_seq: 2,
-        body_json: '{"messages":[{"role":"tool","content":"second-request"}]}'
-      })
-    ])
-    const messageStore = createTranscriptProjectionMock([createRecord({ id: 'u1', orderSeq: 1 })])
-
-    service.ensureSessionTapeReady('s1', messageStore as any)
-    const sourceMaps = service.getViewManifestSourceMaps('s1')
-    const baseManifestInput = {
-      sessionId: 's1',
-      messageId: 'a1',
-      requestSeq: 1,
-      taskType: 'chat' as const,
-      policy: 'legacy_context_v1' as const,
-      policyVersion: 1,
-      messages: [{ role: 'user' as const, content: 'hello' }],
-      tools: [],
-      latestEntryId: sourceMaps.latestEntryId,
-      anchorEntryIds: sourceMaps.anchorEntryIds,
-      included: [
-        {
-          entryId: sourceMaps.entryIdByMessageId.get('u1') ?? null,
-          messageId: 'u1',
-          orderSeq: 1,
-          role: 'user' as const,
-          source: 'tape' as const,
-          reason: 'selected_history' as const
-        }
-      ],
-      excluded: [],
-      tokenBudget: {
-        contextLength: 1000,
-        requestedMaxTokens: 100,
-        effectiveMaxTokens: 100,
-        reserveTokens: 100,
-        toolReserveTokens: 0
-      },
-      providerId: 'openai',
-      modelId: 'gpt-4o',
-      summaryCursorOrderSeq: 1,
-      supportsVision: true,
-      supportsAudioInput: false,
-      traceDebugEnabled: true,
-      assembledAt: 200
-    }
-    service.appendViewManifest(createTapeViewManifest(baseManifestInput))
-    service.appendViewManifest(
-      createTapeViewManifest({
-        ...baseManifestInput,
-        requestSeq: 2,
-        taskType: 'tool_loop',
-        policy: 'tool_loop_shadow',
-        policyVersion: null,
-        assembledAt: 250
-      })
-    )
-
-    const first = service.exportReplaySlice('s1', 'a1', {
-      requestSeq: 1,
-      includeTracePayload: true
-    })
-    const second = service.exportReplaySlice('s1', 'a1', {
-      requestSeq: 2,
-      includeTracePayload: true
-    })
-
-    expect(first?.trace?.bodyJson).toContain('first-request')
-    expect(second?.trace?.bodyJson).toContain('second-request')
-  })
-
-  it('binds replay to the latest physical attempt for a request sequence', () => {
-    const { table } = createTapeTableMock()
-    const service = createTapeService(table, [
-      createTraceRow({ id: 'attempt-1', request_seq: 2, physical_attempt: 1, created_at: 500 }),
-      createTraceRow({ id: 'attempt-2', request_seq: 2, physical_attempt: 2, created_at: 400 })
-    ])
-    service.appendViewManifest(createObservationManifest({ requestSeq: 2 }))
-
-    expect(service.exportReplaySlice('s1', 'a1', { requestSeq: 2 })?.trace).toMatchObject({
-      id: 'attempt-2',
-      physicalAttempt: 2
-    })
-  })
-
-  it('returns null when exporting a replay slice without a manifest', () => {
-    const { table } = createTapeTableMock()
-    const service = createTapeService(table, [createTraceRow()])
-
-    expect(service.exportReplaySlice('s1', 'a1')).toBeNull()
-  })
-
-  it('rejects non-positive replay request sequences', () => {
-    const { table } = createTapeTableMock()
-    const service = createTapeService(table, [createTraceRow()])
-
-    expect(() => service.exportReplaySlice('s1', 'a1', { requestSeq: 0 })).toThrow(
-      'requestSeq must be a positive integer.'
-    )
   })
 })

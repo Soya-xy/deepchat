@@ -741,25 +741,6 @@ function createTranscriptProjectionMock(records: ChatMessageRecord[] = []) {
   }
 }
 
-function createTraceRow(overrides: Record<string, unknown> = {}) {
-  return {
-    id: 'trace-1',
-    message_id: 'a1',
-    session_id: 's1',
-    provider_id: 'openai',
-    model_id: 'gpt-4o',
-    request_seq: 1,
-    logical_round: null,
-    physical_attempt: null,
-    endpoint: 'https://api.openai.test/v1/chat/completions',
-    headers_json: '{"authorization":"[redacted]"}',
-    body_json: '{"messages":[{"role":"user","content":"hello"}]}',
-    truncated: 0,
-    created_at: 300,
-    ...overrides
-  }
-}
-
 function createObservationManifest(
   overrides: Partial<Parameters<typeof createTapeViewManifest>[0]> = {}
 ) {
@@ -794,7 +775,7 @@ function createObservationManifest(
   })
 }
 
-function createTapeService(table: unknown, traceRows: Array<Record<string, unknown>> = []) {
+function createTapeService(table: unknown) {
   return new SessionTape({
     deepchatTapeEntriesTable: table,
     deepchatExecutionJournalStore: table,
@@ -806,11 +787,7 @@ function createTapeService(table: unknown, traceRows: Array<Record<string, unkno
       }),
       getByEntryIdsIfCurrent: vi.fn().mockReturnValue([])
     },
-    deepchatMessageTracesTable: {
-      listByMessageId: vi.fn((messageId: string) =>
-        traceRows.filter((row) => row.message_id === messageId)
-      )
-    },
+    deepchatMessageTracesTable: { listByMessageId: vi.fn().mockReturnValue([]) },
     deepchatSessionsTable: { getSummaryState: vi.fn().mockReturnValue(null) }
   } as any)
 }
@@ -892,7 +869,6 @@ export {
   createTapeTableMock,
   createRecord,
   createTranscriptProjectionMock,
-  createTraceRow,
   createObservationManifest,
   createTapeService,
   createLinkedTapeService,
