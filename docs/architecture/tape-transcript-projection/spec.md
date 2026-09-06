@@ -163,6 +163,12 @@ the Tape reset; the legacy import overwrite clears it with the other legacy-owne
    import or recovery that was never followed by a turn) and keeps the applier from replaying an
    empty Tape over a populated transcript; the reverse projection keeps the cursor honest for a fact
    that entered the Tape without going through the transcript, which no path produces today.
+   This step only adds. A transcript row whose Tape fact was retracted is kept and the retraction is
+   not applied: with no cursor, the transcript is the record the user has been looking at, and a
+   Session without a cursor is exactly the one whose Tape may be stale. Deleting a row here would
+   trust the stale side. No path produces that state either (delete removes the row and appends the
+   retraction in one transaction); once a cursor exists, the incremental replay in step 4 applies
+   retractions as they arrive.
 3. If the meta row exists but its incarnation differs from the Tape's: the Tape was reset under the
    transcript. Treat the row as absent and run step 2, which overwrites it.
 4. If `max_entry_id` is behind the Tape head: `replay(sessionId, max_entry_id)`, then advance the
