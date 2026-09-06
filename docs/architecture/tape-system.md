@@ -429,9 +429,10 @@ version 和 synthetic contribution provenance。未知旧 fact 可以按兼容�
 已知 fact 的含义。测试至少覆盖正常 chat、resume、tool interaction、compaction、context pressure、
 Subagent frozen head、provider attempt outcome 和旧 manifest 读取。
 
-hash 算法、`hashVersion` 与 provenance key 前缀都是落盘合同的一部分。ViewManifest 除 `assembledAt`、`viewId`
-外的全部 stored 字段都进 `manifestHash`，reader 原样透传 stored 字段后重算，所以改 hashable 变换或 canonicalizer
-会让历史 manifest 校验变 `invalid`，shape 校验要求的字段离开写入端则必须伴随新 schemaVersion；ExecutionContract、
+hash 算法、`hashVersion` 与 provenance key 前缀都是落盘合同的一部分。ViewManifest 的 hashable 是 stored 字段去掉
+`assembledAt`、`viewId`，并把 `hashes` 缩成 `{ promptHash, toolDefinitionsHash }`，其余字段全部进 `manifestHash`；
+reader 原样透传 stored 字段后重算，所以改 hashable 变换或 canonicalizer 会让历史 manifest 校验变 `invalid`，
+shape 校验要求的字段离开写入端则必须伴随新 schemaVersion；ExecutionContract、
 tool surface fact 与 Journal payload 用 exact-key 校验，删除任一字段或新增必填字段都会让历史行 malformed。两类
 失效都会让 `skill_run`、paused dispatch 与 pending action 恢复 fail closed，Journal 历史则被归类为 corruption。
 legacy `hashJson` 不是只读兼容路径，它仍在产出 schema-4 manifest hash、tool fact provenance key 与 Execution
@@ -441,8 +442,8 @@ Tape 之外的对象（provider 投影、process-live capability、执行包临�
 entry 的凭据；后者不是对不可变 entry 的双重保证，entryId 无法替代它们。
 
 stored manifest validation、legacy `hashVersion` normalization、entry-id collection 和 replay slice hash
-属于 `src/main/tape/domain/replay.ts` 的纯逻辑；SQLite row parsing、message trace 和 terminal evidence
-读取仍属于 `TapeViewReplayService`，不能反向放进 domain。
+属于 `src/main/tape/domain/replay.ts` 的纯逻辑；SQLite row parsing 和 message trace 读取仍属于
+`TapeViewReplayService`，不能反向放进 domain。
 
 关键行为测试位于 `test/main/session/data/tape*.test.ts`、`transcriptAtomicity.test.ts`、
 `transcriptProjection.test.ts` 与 `messageContent.test.ts`，分层守护位于
