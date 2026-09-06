@@ -51,19 +51,21 @@ Completion: no transcript terminal write happens without its fact in the same tr
 
 ## Slice 4: Projection cursor, replay and head-comparison readiness
 
-- [ ] Add `deepchat_transcript_projection_meta` table and registration in `SessionDatabase`;
-      `clearMessages` deletes the row in its transaction.
-- [ ] Every fact-first write advances the row to the Tape head in the same transaction.
-- [ ] `TranscriptProjectionApplier.replay(sessionId, afterEntryId)` over effective message input
-      rows: message facts via `applyRecord`, retractions via `applyRetraction`, compaction
-      indicators skipped; UPSERT-only.
-- [ ] `TapeReconcilerService.ensureSessionTapeReady` implements readiness steps 1–5 from the spec:
-      one head query, one-time legacy backfill for absent meta, incarnation mismatch handling,
-      incremental replay, unchanged `historyRecords`. Remove the `reconciled` map and
-      `digestTranscript`.
-- [ ] Tests: unchanged Session performs no transcript read (spy on `getMessages`); absent meta with
-      transcript rows backfills once and deletes nothing; meta deleted plus a direct Tape append
-      materializes the message; incarnation mismatch re-runs the backfill.
+- [x] `deepchat_transcript_projection_meta` table (`tables/deepchatTranscriptProjectionMeta.ts`),
+      registered in the schema catalog and `SessionDatabase`; `deleteBySession` drops the row inside
+      the `clearMessages` transaction.
+- [x] Every fact-first write moves an established cursor to the Tape head (`getProjectionHead`);
+      a Session without a cursor for the current incarnation waits for reconciliation to backfill.
+- [x] `TranscriptProjectionApplier.applyTapeEntries` replays message facts and retractions in entry
+      order; compaction indicators are skipped. `getEffectiveMessageInputRowsAfter` reads the range.
+- [x] `TapeReconcilerService.ensureSessionTapeReady` compares cursor and head in one store
+      transaction: absent or foreign-incarnation cursor backfills the transcript once, a cursor
+      behind the head replays the increment. The `reconciled` map and `digestTranscript` are gone.
+- [x] Tests: cursor suite in `tapeReconciler.test.ts`; real-SQLite `transcriptProjection.test.ts`
+      (cursor established by readiness and moved by writes, direct Tape facts materialized,
+      pre-projection rows backfilled without deletion, reset rebuilds the cursor) in the native CI
+      step; harness doubles gain the meta table and drop the cursor where they install history
+      behind the projection's back.
 
 Completion: `ensureSessionTapeReady` is O(delta) and the transcript digest is gone.
 

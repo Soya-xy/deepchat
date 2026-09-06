@@ -629,6 +629,14 @@ function createMockSqlitePresenter() {
           (entry) => entry.session_id === sessionId && isEffectiveMessageInputRow(entry)
         )
       ),
+      getEffectiveMessageInputRowsAfter: vi.fn((sessionId: string, afterEntryId: number) =>
+        tapeEntries.filter(
+          (entry) =>
+            entry.session_id === sessionId &&
+            entry.entry_id > afterEntryId &&
+            isEffectiveMessageInputRow(entry)
+        )
+      ),
       getByEntryIds: vi.fn((sessionId: string, entryIds: readonly number[]) => {
         const selected = new Set(entryIds)
         return tapeEntries.filter(
@@ -927,6 +935,20 @@ function createMockSqlitePresenter() {
     deepchatUsageStatsTable: {
       upsert: vi.fn()
     },
+    deepchatTranscriptProjectionMetaTable: (() => {
+      const cursors = new Map<string, { tapeIncarnationId: string; maxEntryId: number }>()
+      return {
+        get: vi.fn((sessionId: string) => cursors.get(sessionId) ?? null),
+        upsert: vi.fn(
+          (sessionId: string, cursor: { tapeIncarnationId: string; maxEntryId: number }) => {
+            cursors.set(sessionId, { ...cursor })
+          }
+        ),
+        delete: vi.fn((sessionId: string) => {
+          cursors.delete(sessionId)
+        })
+      }
+    })(),
     deepchatMessageSearchResultsTable: {
       add: vi.fn(),
       listByMessageId: vi.fn().mockReturnValue([]),
@@ -2584,6 +2606,9 @@ describe('DeepChatAgentHarness', () => {
 
   function installSessionRows(initialRows: any[]) {
     let rows = [...initialRows]
+    // Rows installed here never went through a fact-first write, so the Session has no cursor and
+    // the next readiness check backfills them into the Tape.
+    sqlitePresenter.deepchatTranscriptProjectionMetaTable.delete('s1')
     sqlitePresenter.deepchatMessagesTable.insert.mockImplementation((row: any) => {
       const now = Date.now()
       rows.push({
@@ -12011,6 +12036,9 @@ describe('DeepChatAgentHarness', () => {
         makeDeepchatAssistantRow(8, '', assistantMessageId, 'pending')
       ]
       sqlitePresenter.deepchatMessagesTable.getBySession.mockReturnValue(records)
+      // The history is installed behind the projection's back, so drop the cursor: the next
+      // readiness check then backfills it into the Tape as it would for a pre-projection Session.
+      sqlitePresenter.deepchatTranscriptProjectionMetaTable.delete('s1')
       return [
         { role: 'system', content: systemPrompt },
         ...records
@@ -13647,6 +13675,7 @@ describe('DeepChatAgentHarness', () => {
       })
       await agent.processMessage('s1', 'Hello', { maxProviderRounds: 1 })
       sqlitePresenter.deepchatMessagesTable.getBySession.mockReturnValue(createSentTurnRecords(3))
+      sqlitePresenter.deepchatTranscriptProjectionMetaTable.delete('s1')
       llmProvider.generateText.mockClear()
 
       const callArgs = (processStream as ReturnType<typeof vi.fn>).mock.calls[0][0]

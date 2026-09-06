@@ -7,6 +7,12 @@ import {
   resolveUsageModelId,
   resolveUsageProviderId
 } from '@/session/usageStats'
+import type { DeepChatTapeEntryRow } from '@/tape/domain/entry'
+import {
+  parseTapeJsonObject,
+  TAPE_MESSAGE_RETRACTED_EVENT_NAME,
+  tapeEntryToMessageRecord
+} from '@/tape/domain/effectiveSemantics'
 import type { SessionDatabase } from './database'
 import { parseAssistantBlocks, parseUserContent, toUserMessageFileRowInput } from './messageContent'
 
@@ -53,6 +59,31 @@ export class TranscriptProjectionApplier {
       this.upsertSearchDocument(record)
     }
     this.persistUsageStats(record)
+  }
+
+  /**
+   * Replays message facts and retractions the Tape holds past the projection cursor, in entry
+   * order. Compaction indicator events are left to `reconcileCompactionMessages`, which settles
+   * marker rows from the reconstruction anchor.
+   */
+  applyTapeEntries(rows: readonly DeepChatTapeEntryRow[]): void {
+    for (const row of rows) {
+      if (row.kind === 'message') {
+        const record = tapeEntryToMessageRecord(row)
+        if (record) this.applyRecord(record)
+        continue
+      }
+      if (row.kind === 'event' && row.name === TAPE_MESSAGE_RETRACTED_EVENT_NAME) {
+        const data = parseTapeJsonObject(row.payload_json).data
+        const messageId =
+          data && typeof data === 'object' && !Array.isArray(data)
+            ? (data as { messageId?: unknown }).messageId
+            : undefined
+        if (typeof messageId === 'string' && messageId) {
+          this.applyRetractions([messageId])
+        }
+      }
+    }
   }
 
   /** Removes every message-scoped row, including the runtime sidecars keyed by message id. */

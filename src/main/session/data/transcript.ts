@@ -23,7 +23,10 @@ import type {
   ExecutionJournalAuditReader,
   TapeAnchorReader,
   TapeCompactionModelCallWriter,
-  TapeMessageFactWriter
+  TapeMessageFactWriter,
+  TapeProjectionCursor,
+  TapeProjectionHeadReader,
+  TapeTranscriptProjection
 } from '@/tape/ports/capabilities'
 import type { TapeMessageReplacementOptions } from '@/tape/domain/facts'
 import type { TapeCompactionModelCallInput } from '@/tape/domain/compactionUsage'
@@ -115,15 +118,21 @@ type StructuredMessageMaps = {
   assistantRows: Map<string, DeepChatAssistantBlockRow[]>
 }
 
-export class SessionTranscript {
+/** The Tape capabilities the transcript needs: message facts, compaction usage, and the head. */
+export type TranscriptTapePort = TapeMessageFactWriter &
+  TapeCompactionModelCallWriter &
+  TapeProjectionHeadReader
+
+export class SessionTranscript implements TapeTranscriptProjection {
   private database: SessionDatabase
   private readonly tapeFacts: TapeMessageFactWriter
+  private readonly tapeHead: TapeProjectionHeadReader
   private readonly compactionUsage: TapeCompactionModelCallWriter
   private readonly projection: TranscriptProjectionApplier
 
   constructor(
     database: SessionDatabase,
-    tapeFacts: TapeMessageFactWriter & TapeCompactionModelCallWriter,
+    tapeFacts: TranscriptTapePort,
     private readonly executionAudit?: Pick<
       ExecutionJournalAuditReader,
       'listMessageIdsWithNestedExecutionAudit'
@@ -135,8 +144,24 @@ export class SessionTranscript {
   ) {
     this.database = database
     this.tapeFacts = tapeFacts
+    this.tapeHead = tapeFacts
     this.compactionUsage = tapeFacts
     this.projection = new TranscriptProjectionApplier(database)
+  }
+
+  // TapeTranscriptProjection: reconciliation reads where the tables stand, replays what the Tape
+  // holds past that point, and moves the cursor. Terminal writes below move it themselves.
+
+  readProjectionCursor(sessionId: string): TapeProjectionCursor | null {
+    return this.database.deepchatTranscriptProjectionMetaTable.get(sessionId)
+  }
+
+  writeProjectionCursor(sessionId: string, cursor: TapeProjectionCursor): void {
+    this.database.deepchatTranscriptProjectionMetaTable.upsert(sessionId, cursor)
+  }
+
+  applyTapeEntries(rows: readonly DeepChatTapeEntryRow[]): void {
+    this.projection.applyTapeEntries(rows)
   }
 
   private runInDatabaseTransaction<T>(operation: () => T): T {
@@ -285,6 +310,7 @@ export class SessionTranscript {
       )
     }
     this.database.deepchatMessagesTable.incrementOrderSeqFrom(sessionId, fromOrderSeq, shiftedAt)
+    this.markProjectionCurrent(sessionId)
   }
 
   updateAssistantContent(
@@ -588,6 +614,7 @@ export class SessionTranscript {
   }
 
   deleteBySession(sessionId: string): void {
+    this.database.deepchatTranscriptProjectionMetaTable.delete(sessionId)
     this.database.deepchatSearchDocumentsTable.deleteBySession(sessionId)
     this.database.deepchatAssistantBlocksTable.deleteBySession(sessionId)
     this.database.deepchatUserMessageLinksTable.deleteBySession(sessionId)
@@ -605,7 +632,11 @@ export class SessionTranscript {
   private deleteMessageWithReason(messageId: string, reason: string): void {
     this.runInDatabaseTransaction(() => {
       const record = this.getMessage(messageId)
-      this.commitRetractions(record ? [record] : [], reason, [messageId])
+      if (!record) {
+        this.projection.applyRetractions([messageId])
+        return
+      }
+      this.commitRetractions(record.sessionId, [record], reason, [messageId])
     })
   }
 
@@ -615,6 +646,7 @@ export class SessionTranscript {
         (record) => record.orderSeq >= fromOrderSeq
       )
       this.commitRetractions(
+        sessionId,
         records,
         'messages_deleted_from_order_seq',
         records.map((record) => record.id)
@@ -874,6 +906,7 @@ export class SessionTranscript {
   private commitRecord(record: ChatMessageRecord): void {
     this.tapeFacts.appendMessageRecord(record)
     this.projection.applyRecord(record)
+    this.markProjectionCurrent(record.sessionId)
   }
 
   private commitReplacement(
@@ -882,9 +915,11 @@ export class SessionTranscript {
   ): void {
     this.tapeFacts.appendMessageReplacement(record, options)
     this.projection.applyRecord(record)
+    this.markProjectionCurrent(record.sessionId)
   }
 
   private commitRetractions(
+    sessionId: string,
     records: ChatMessageRecord[],
     reason: string,
     messageIds: string[]
@@ -893,6 +928,22 @@ export class SessionTranscript {
       this.tapeFacts.appendMessageRetraction(record, reason)
     }
     this.projection.applyRetractions(messageIds)
+    this.markProjectionCurrent(sessionId)
+  }
+
+  /**
+   * The tables now reflect every message fact up to the Tape head, including the one just
+   * appended, so an established cursor moves to the head. A Session without a cursor for this
+   * incarnation is left alone: its transcript may still hold rows the Tape never saw (written
+   * before the projection existed, or before a Tape reset), and only reconciliation's one-time
+   * backfill may declare the two aligned.
+   */
+  private markProjectionCurrent(sessionId: string): void {
+    const head = this.tapeHead.getProjectionHead(sessionId)
+    if (!head) return
+    const current = this.readProjectionCursor(sessionId)
+    if (current?.tapeIncarnationId !== head.tapeIncarnationId) return
+    this.writeProjectionCursor(sessionId, head)
   }
 
   /** The record a fact carries: content in the form the tables will hand back after the write. */

@@ -195,9 +195,25 @@ function createProjectionHarness() {
       maxRequestSeqByMessageId: vi.fn(() => 0)
     },
     deepchatUsageStatsTable: { upsert: vi.fn() },
+    deepchatTranscriptProjectionMetaTable: (() => {
+      const cursors = new Map<string, { tapeIncarnationId: string; maxEntryId: number }>()
+      return {
+        get: vi.fn((sessionId: string) => cursors.get(sessionId) ?? null),
+        upsert: vi.fn(
+          (sessionId: string, cursor: { tapeIncarnationId: string; maxEntryId: number }) => {
+            cursors.set(sessionId, { ...cursor })
+          }
+        ),
+        delete: vi.fn((sessionId: string) => {
+          cursors.delete(sessionId)
+        })
+      }
+    })(),
     deepchatTapeEntriesTable: {
+      runInTransaction: vi.fn((operation: () => unknown) => operation()),
       ensureBootstrapAnchor: vi.fn(),
       getBootstrapIncarnation: vi.fn(),
+      getMaxEntryId: vi.fn(() => tapeRows.length),
       append: vi.fn(appendTape),
       appendEvent: vi.fn(
         (input: {

@@ -142,9 +142,12 @@ one transaction of their own.
 
 A new table `deepchat_transcript_projection_meta(session_id PRIMARY KEY, tape_incarnation_id,
 max_entry_id, projection_version, updated_at)` follows the `deepchat_memory_ingestion_projection_meta`
-pattern. Every fact-first write sets the row to the Tape head after its append, in the same
-transaction. `clearMessages` deletes the row inside its existing transaction, next to the transcript
-delete and the Tape reset.
+pattern. Every fact-first write moves an established row to the Tape head after its append, in the
+same transaction. A write does not create the row: a Session without a cursor for the current
+incarnation may still hold transcript rows the Tape never saw (rows written before the projection
+existed, or before a Tape reset), and only readiness step 2 below may declare the two aligned.
+`clearMessages` deletes the row inside its existing transaction, next to the transcript delete and
+the Tape reset.
 
 `ensureSessionTapeReady(sessionId)` becomes:
 
@@ -155,14 +158,20 @@ delete and the Tape reset.
    before this change (a fork, import or recovery that was never followed by a turn), and it is what
    keeps the applier from ever replaying an empty Tape over a populated transcript.
 3. If the meta row exists but its incarnation differs from the Tape's: the Tape was reset under the
-   transcript. Delete the meta row and fall through to step 2.
+   transcript. Treat the row as absent and run step 2, which overwrites it.
 4. If `max_entry_id` is behind the Tape head: `replay(sessionId, max_entry_id)`, then advance the
    row to the head. Non-message appends (manifests, journal, anchors) advance the cursor with an
    empty replay.
 5. Return `historyRecords` from the effective Tape view as today.
 
-The in-process `reconciled` map and the transcript digest are removed. The result type
-`TapeBackfillResult` keeps its shape; `appendedFactCount` counts facts appended by step 2.
+Steps 1–4 run in one store transaction. The in-process `reconciled` map and the transcript digest
+are removed. The result type `TapeBackfillResult` keeps its shape; `messageCount` and `maxOrderSeq`
+derive from the Tape records and `appendedFactCount` counts facts appended by step 2.
+
+The Tape side of this contract is `TapeTranscriptProjection` in `ports/capabilities.ts`
+(`getMessages`, `readProjectionCursor`, `writeProjectionCursor`, `applyTapeEntries`), implemented by
+`SessionTranscript`; the reconciler never imports session code. The transcript reads the head it
+records through `TapeProjectionHeadReader.getProjectionHead`.
 
 ### Idempotent payload guard
 

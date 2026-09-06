@@ -494,6 +494,8 @@ function createMockSqlitePresenter() {
     },
     deepchatTapeEntriesTable: {
       ensureBootstrapAnchor: vi.fn(),
+      getBootstrapIncarnation: vi.fn(() => undefined),
+      getMaxEntryId: vi.fn(() => 0),
       // The store contract returns the appended row; the fact writer reads its payload back.
       append: vi.fn(
         (input: {
@@ -542,6 +544,11 @@ function createMockSqlitePresenter() {
       }
     },
     deepchatUsageStatsTable,
+    deepchatTranscriptProjectionMetaTable: {
+      get: vi.fn(() => null),
+      upsert: vi.fn(),
+      delete: vi.fn()
+    },
     newSessionsTable: {
       create: vi.fn(),
       get: vi.fn().mockReturnValue(null),

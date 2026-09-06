@@ -99,8 +99,15 @@ function createMockSqlitePresenter() {
     deepchatUsageStatsTable: {
       upsert: vi.fn()
     },
+    deepchatTranscriptProjectionMetaTable: {
+      get: vi.fn(() => null),
+      upsert: vi.fn(),
+      delete: vi.fn()
+    },
     deepchatTapeEntriesTable: {
       ensureBootstrapAnchor: vi.fn(),
+      getBootstrapIncarnation: vi.fn(() => undefined),
+      getMaxEntryId: vi.fn(() => 0),
       // The store contract returns the appended row; the fact writer reads its payload back.
       append: vi.fn((input: { sessionId: string; kind: string; payload?: unknown }) => ({
         session_id: input.sessionId,
@@ -1194,6 +1201,8 @@ describe('SessionTranscript', () => {
       sqlitePresenter.getDatabase = vi.fn().mockReturnValue({ transaction })
       sqlitePresenter.deepchatTapeEntriesTable = {
         ensureBootstrapAnchor: vi.fn(),
+        getBootstrapIncarnation: vi.fn(() => undefined),
+        getMaxEntryId: vi.fn(() => 0),
         appendEvent: vi.fn(() => {
           throw new Error('append failed')
         })
@@ -1215,6 +1224,8 @@ describe('SessionTranscript', () => {
       sqlitePresenter.getDatabase = vi.fn().mockReturnValue({ transaction })
       sqlitePresenter.deepchatTapeEntriesTable = {
         ensureBootstrapAnchor: vi.fn(),
+        getBootstrapIncarnation: vi.fn(() => undefined),
+        getMaxEntryId: vi.fn(() => 0),
         appendEvent
       }
       sqlitePresenter.deepchatMessagesTable.get.mockReturnValue(
@@ -1336,6 +1347,8 @@ describe('SessionTranscript', () => {
       sqlitePresenter.getDatabase = vi.fn().mockReturnValue({ transaction })
       sqlitePresenter.deepchatTapeEntriesTable = {
         ensureBootstrapAnchor: vi.fn(),
+        getBootstrapIncarnation: vi.fn(() => undefined),
+        getMaxEntryId: vi.fn(() => 0),
         appendEvent
       }
       sqlitePresenter.deepchatMessagesTable.getBySession.mockReturnValue([

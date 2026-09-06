@@ -187,6 +187,14 @@ function createMockSqlitePresenter() {
         (entry) => entry.session_id === sessionId && isEffectiveMessageInputRow(entry)
       )
     ),
+    getEffectiveMessageInputRowsAfter: vi.fn((sessionId: string, afterEntryId: number) =>
+      tapeEntries.filter(
+        (entry) =>
+          entry.session_id === sessionId &&
+          entry.entry_id > afterEntryId &&
+          isEffectiveMessageInputRow(entry)
+      )
+    ),
     getByEntryIds: vi.fn((sessionId: string, entryIds: readonly number[]) => {
       const requestedIds = new Set(entryIds)
       return tapeEntries.filter(
@@ -824,6 +832,20 @@ function createMockSqlitePresenter() {
     deepchatTapeEntriesTable: tapeTable,
     deepchatExecutionJournalStore: tapeTable,
     tapeLifecycle: tapeTable,
+    deepchatTranscriptProjectionMetaTable: (() => {
+      const cursors = new Map<string, { tapeIncarnationId: string; maxEntryId: number }>()
+      return {
+        get: vi.fn((sessionId: string) => cursors.get(sessionId) ?? null),
+        upsert: vi.fn(
+          (sessionId: string, cursor: { tapeIncarnationId: string; maxEntryId: number }) => {
+            cursors.set(sessionId, { ...cursor })
+          }
+        ),
+        delete: vi.fn((sessionId: string) => {
+          cursors.delete(sessionId)
+        })
+      }
+    })(),
     deepchatTapeSearchProjectionTable: {
       deleteBySession: vi.fn(),
       isCurrent: vi.fn().mockReturnValue(false),
