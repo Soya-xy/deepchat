@@ -799,8 +799,7 @@ function isStoredDynamicControlSnapshot(
 }
 
 function isStoredExecutionProvenance(
-  value: unknown,
-  ceilings: DeepChatExecutionContract['ceilings']
+  value: unknown
 ): value is DeepChatExecutionContract['provenance'] {
   return (
     hasExactKeys(value, EXECUTION_PROVENANCE_KEYS) &&
@@ -813,7 +812,6 @@ function isStoredExecutionProvenance(
     isSha256(value.effectiveGenerationConfigHash) &&
     isSha256(value.providerVisibleToolDefinitionsHash) &&
     isSha256(value.internalExecutionPolicyHash) &&
-    value.internalExecutionPolicyHash === hashData(ceilings, 'internal execution policy') &&
     matchesNormalizedString(
       value.assemblerVersion,
       'provenance.assemblerVersion',
@@ -1107,7 +1105,7 @@ export function isDeepChatExecutionContract(value: unknown): value is DeepChatEx
       !isStoredExecutionContractRequest(value.request) ||
       !isStoredExecutionCeilings(value.ceilings) ||
       !isStoredDynamicControlSnapshot(value.dynamicControlSnapshot) ||
-      !isStoredExecutionProvenance(value.provenance, value.ceilings) ||
+      !isStoredExecutionProvenance(value.provenance) ||
       !isSha256(value.contractHash)
     ) {
       return false

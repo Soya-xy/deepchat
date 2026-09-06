@@ -502,8 +502,13 @@ describe('ExecutionContract domain', () => {
       ...contract,
       dynamicControlSnapshot: { ...contract.dynamicControlSnapshot, permissionMode: 'full_access' }
     } as typeof contract
+    const staleProvenance = {
+      ...contract,
+      provenance: { ...contract.provenance, internalExecutionPolicyHash: 'a'.repeat(64) }
+    } as typeof contract
 
     expect(isDeepChatExecutionContract(tampered)).toBe(false)
+    expect(isDeepChatExecutionContract(staleProvenance)).toBe(false)
     expect(isToolEffectWithinCeiling('read', 'write')).toBe(true)
     expect(isToolEffectWithinCeiling('write', 'read')).toBe(false)
     expect(meetToolEffects('read', 'write')).toBe('read')
