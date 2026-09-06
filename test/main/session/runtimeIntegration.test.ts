@@ -550,6 +550,24 @@ function createMockSqlitePresenter() {
         messagesStore.set(row.id, record)
         messagesList.push(record)
       }),
+      upsert: vi.fn((row: any) => {
+        const existing = messagesStore.get(row.id)
+        const record = {
+          ...row,
+          session_id: row.sessionId,
+          order_seq: row.orderSeq,
+          is_context_edge: row.isContextEdge,
+          metadata: row.metadata,
+          created_at: row.createdAt,
+          updated_at: row.updatedAt
+        }
+        if (existing) {
+          Object.assign(existing, record)
+          return
+        }
+        messagesStore.set(row.id, record)
+        messagesList.push(record)
+      }),
       updateContent: vi.fn((id: string, content: string) => {
         const msg = messagesStore.get(id)
         if (msg) msg.content = content
@@ -629,6 +647,10 @@ function createMockSqlitePresenter() {
       delete: vi.fn((id: string) => {
         messagesStore.delete(id)
         messagesList = messagesList.filter((item) => item.id !== id)
+      }),
+      deleteByIds: vi.fn((ids: string[]) => {
+        for (const id of ids) messagesStore.delete(id)
+        messagesList = messagesList.filter((item) => !ids.includes(item.id))
       }),
       deleteFromOrderSeq: vi.fn((sessionId: string, fromOrderSeq: number) => {
         const idsToDelete = messagesList
@@ -1134,21 +1156,24 @@ describe('Integration: createSession end-to-end', () => {
       })
     )
 
-    // 3. Messages created (user + assistant)
-    expect(sqlitePresenter.deepchatMessagesTable.insert).toHaveBeenCalledTimes(2)
-
-    const userInsert = sqlitePresenter.deepchatMessagesTable.insert.mock.calls[0][0]
-    expect(userInsert.role).toBe('user')
+    // 3. Messages created: the user prompt is a terminal record, the assistant a pending shell
+    const userInsert = sqlitePresenter.deepchatMessagesTable.upsert.mock.calls
+      .map(([row]: any[]) => row)
+      .find((row: any) => row.role === 'user')
+    expect(userInsert).toBeTruthy()
     const userContent = JSON.parse(userInsert.content)
     expect(userContent.text).toBe('Tell me a joke')
     expect(userContent.files).toHaveLength(1)
 
-    const assistantInsert = sqlitePresenter.deepchatMessagesTable.insert.mock.calls[1][0]
+    expect(sqlitePresenter.deepchatMessagesTable.insert).toHaveBeenCalledTimes(1)
+    const assistantInsert = sqlitePresenter.deepchatMessagesTable.insert.mock.calls[0][0]
     expect(assistantInsert.role).toBe('assistant')
     expect(assistantInsert.status).toBe('pending')
 
     // 4. Assistant message finalized with content
-    expect(sqlitePresenter.deepchatMessagesTable.updateContentAndStatus).toHaveBeenCalled()
+    expect(sqlitePresenter.deepchatMessagesTable.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'assistant', status: 'sent' })
+    )
 
     // 5. Typed events emitted with conversationId
     const activatedCalls = publishDeepchatEventMock.mock.calls.filter(
@@ -2046,9 +2071,12 @@ describe('Integration: crash recovery', () => {
     })
 
     expect(sqlitePresenter.deepchatMessagesTable.getByStatus).toHaveBeenCalledWith('pending')
-    expect(sqlitePresenter.deepchatMessagesTable.updateContentAndStatus).toHaveBeenCalledTimes(2)
-    const [messageId, contentJson, status] =
-      sqlitePresenter.deepchatMessagesTable.updateContentAndStatus.mock.calls[0]
+    expect(sqlitePresenter.deepchatMessagesTable.upsert).toHaveBeenCalledTimes(2)
+    const {
+      id: messageId,
+      content: contentJson,
+      status
+    } = sqlitePresenter.deepchatMessagesTable.upsert.mock.calls[0][0]
     expect(messageId).toBe('m1')
     expect(status).toBe('error')
     expect(JSON.parse(contentJson)).toEqual([

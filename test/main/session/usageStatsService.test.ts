@@ -217,6 +217,32 @@ function createMockSqlitePresenter() {
     get(messageId: string) {
       return messages.get(messageId)
     },
+    upsert(input: {
+      id: string
+      sessionId: string
+      orderSeq: number
+      role: MessageRow['role']
+      content: string
+      status: MessageRow['status']
+      isContextEdge: number
+      metadata: string
+      createdAt: number
+      updatedAt: number
+    }) {
+      messages.set(input.id, {
+        id: input.id,
+        session_id: input.sessionId,
+        order_seq: input.orderSeq,
+        role: input.role,
+        content: input.content,
+        status: input.status,
+        metadata: input.metadata,
+        is_context_edge: input.isContextEdge,
+        trace_count: 0,
+        created_at: input.createdAt,
+        updated_at: input.updatedAt
+      })
+    },
     updateContentAndStatus(
       messageId: string,
       content: string,

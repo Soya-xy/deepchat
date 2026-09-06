@@ -296,13 +296,66 @@ function createMockSqlitePresenter() {
       }
     })
   }
-  const deepchatMessagesTable = {
-    insert: vi.fn(),
-    updateContent: vi.fn(),
-    updateMetadata: vi.fn(),
-    updateStatus: vi.fn(),
+  // Rows written through `insert`/`upsert` are readable through `get`, the way the terminal
+  // message writes need them. The real table UPSERTs terminal records in one statement; the double
+  // keeps `insert` and `updateContentAndStatus` as the observable seams so a test can tell a new
+  // row from a terminal update, and routes `upsert` to whichever the row's existence calls for.
+  const messageRows = new Map<string, any>()
+  const messageRowFromInput = (row: any) => ({
+    id: row.id,
+    session_id: row.sessionId,
+    order_seq: row.orderSeq,
+    role: row.role,
+    content: row.content,
+    status: row.status,
+    is_context_edge: row.isContextEdge ?? 0,
+    metadata: row.metadata ?? '{}',
+    created_at: row.createdAt ?? Date.now(),
+    updated_at: row.updatedAt ?? row.createdAt ?? Date.now()
+  })
+  const deepchatMessagesTable: Record<string, any> = {
+    insert: vi.fn((row: any) => {
+      messageRows.set(row.id, messageRowFromInput(row))
+    }),
+    upsert: vi.fn((row: any) => {
+      // nanoid is pinned to one id in these tests, so every row shares it and existence cannot be
+      // read off the id. User rows written here are new prompts (tests that replace user rows go
+      // through `installSessionRows`); an assistant row exists once its shell was inserted or a
+      // test installed it through `get`.
+      const exists =
+        row.role === 'assistant' && (messageRows.has(row.id) || deepchatMessagesTable.get(row.id))
+      if (exists) {
+        deepchatMessagesTable.updateContentAndStatus(row.id, row.content, row.status, row.metadata)
+        const existing = messageRows.get(row.id)
+        if (existing) {
+          Object.assign(existing, { order_seq: row.orderSeq, updated_at: row.updatedAt })
+        }
+        return
+      }
+      deepchatMessagesTable.insert(row)
+    }),
+    updateContent: vi.fn((id: string, content: string) => {
+      const row = messageRows.get(id)
+      if (row) Object.assign(row, { content, updated_at: Date.now() })
+    }),
+    updateMetadata: vi.fn((id: string, metadata: string) => {
+      const row = messageRows.get(id)
+      if (row) Object.assign(row, { metadata, updated_at: Date.now() })
+    }),
+    updateStatus: vi.fn((id: string, status: string) => {
+      const row = messageRows.get(id)
+      if (row) Object.assign(row, { status, updated_at: Date.now() })
+    }),
     incrementOrderSeqFrom: vi.fn(),
-    updateContentAndStatus: vi.fn(),
+    updateContentAndStatus: vi.fn(
+      (id: string, content: string, status: string, metadata?: string) => {
+        const row = messageRows.get(id)
+        if (row) {
+          Object.assign(row, { content, status, updated_at: Date.now() })
+          if (metadata !== undefined) row.metadata = metadata
+        }
+      }
+    ),
     getBySession: vi.fn().mockReturnValue([]),
     hasBySession: vi.fn().mockReturnValue(false),
     getBySessionUpToOrderSeq: vi.fn().mockReturnValue([]),
@@ -311,11 +364,16 @@ function createMockSqlitePresenter() {
     getCompactionRecoveryCandidates: vi.fn().mockReturnValue([]),
     getIdsBySession: vi.fn().mockReturnValue([]),
     getIdsFromOrderSeq: vi.fn().mockReturnValue([]),
-    get: vi.fn(),
+    get: vi.fn((id: string) => messageRows.get(id)),
     getLastUserMessageBeforeOrAtOrderSeq: vi.fn(),
     getMaxOrderSeq: vi.fn().mockReturnValue(0),
     deleteBySession: vi.fn(),
-    delete: vi.fn(),
+    delete: vi.fn((id: string) => {
+      messageRows.delete(id)
+    }),
+    deleteByIds: vi.fn((ids: string[]) => {
+      for (const id of ids) messageRows.delete(id)
+    }),
     deleteFromOrderSeq: vi.fn(),
     recoverPendingMessages: vi.fn().mockReturnValue(0)
   }
@@ -2567,6 +2625,9 @@ describe('DeepChatAgentHarness', () => {
         rows = rows.filter((row) => row.session_id !== sessionId || row.order_seq < fromOrderSeq)
       }
     )
+    sqlitePresenter.deepchatMessagesTable.deleteByIds.mockImplementation((ids: string[]) => {
+      rows = rows.filter((row) => !ids.includes(row.id))
+    })
     sqlitePresenter.deepchatMessagesTable.incrementOrderSeqFrom.mockImplementation(
       (sessionId: string, fromOrderSeq: number) => {
         rows = rows.map((row) =>
@@ -2610,6 +2671,32 @@ describe('DeepChatAgentHarness', () => {
         }
       }
     )
+    sqlitePresenter.deepchatMessagesTable.updateContentAndStatus.mockImplementation(
+      (messageId: string, content: string, status: string, metadata?: string) => {
+        const row = rows.find((candidate) => candidate.id === messageId)
+        if (row) {
+          row.content = content
+          row.status = status
+          if (metadata !== undefined) row.metadata = metadata
+          row.updated_at = Date.now()
+        }
+      }
+    )
+    sqlitePresenter.deepchatMessagesTable.upsert.mockImplementation((row: any) => {
+      const existing = rows.find((candidate) => candidate.id === row.id)
+      if (existing) {
+        sqlitePresenter.deepchatMessagesTable.updateContentAndStatus(
+          row.id,
+          row.content,
+          row.status,
+          row.metadata
+        )
+        existing.order_seq = row.orderSeq
+        existing.updated_at = row.updatedAt
+        return
+      }
+      sqlitePresenter.deepchatMessagesTable.insert(row)
+    })
 
     return {
       getRows: () => rows
@@ -10553,9 +10640,9 @@ describe('DeepChatAgentHarness', () => {
 
       await vi.waitFor(() => expect(commitRunStarted).toHaveBeenCalledOnce())
       await vi.waitFor(() =>
-        expect(sqlitePresenter.deepchatMessagesTable.delete).toHaveBeenCalledWith(
+        expect(sqlitePresenter.deepchatMessagesTable.deleteByIds).toHaveBeenCalledWith([
           'journal-send-assistant'
-        )
+        ])
       )
       expect(await agent.listPendingInputs('s1')).toEqual([])
       expect(processStream).not.toHaveBeenCalled()
@@ -13113,7 +13200,7 @@ describe('DeepChatAgentHarness', () => {
       expect(llmProvider.generateText).not.toHaveBeenCalled()
       expect(secondProviderMessages).not.toContainEqual({ role: 'user', content: oldHistoryText })
       expect(secondProviderMaxTokens).toBeLessThan(firstProviderMaxTokens)
-      expect(sqlitePresenter.deepchatMessagesTable.delete).not.toHaveBeenCalled()
+      expect(sqlitePresenter.deepchatMessagesTable.deleteByIds).not.toHaveBeenCalled()
     })
 
     it('returns local budget guidance when trim-only retry still overflows', async () => {
@@ -13635,7 +13722,7 @@ describe('DeepChatAgentHarness', () => {
       expect(llmProvider.generateText).not.toHaveBeenCalled()
       expect(providerMessages).not.toContainEqual({ role: 'user', content: oldHistoryText })
       expect(requestMessages).not.toContainEqual({ role: 'user', content: oldHistoryText })
-      expect(sqlitePresenter.deepchatMessagesTable.delete).not.toHaveBeenCalled()
+      expect(sqlitePresenter.deepchatMessagesTable.deleteByIds).not.toHaveBeenCalled()
       expect(totalRequestTokens).toBeLessThanOrEqual(getUsableContextLength(8192))
     })
 
@@ -14068,7 +14155,7 @@ describe('DeepChatAgentHarness', () => {
         'sent',
         expect.stringContaining('"compactionStatus":"compacted"')
       ])
-      expect(sqlitePresenter.deepchatMessagesTable.delete).not.toHaveBeenCalled()
+      expect(sqlitePresenter.deepchatMessagesTable.deleteByIds).not.toHaveBeenCalled()
     })
 
     it('emits idle when clearMessages resets compaction state', async () => {
@@ -14949,7 +15036,8 @@ describe('DeepChatAgentHarness', () => {
       expect(result).toEqual({ resumed: true })
       expect(sqlitePresenter.deepchatMessagesTable.incrementOrderSeqFrom).toHaveBeenCalledWith(
         's1',
-        3
+        3,
+        expect.any(Number)
       )
       const compactionInsert = sqlitePresenter.deepchatMessagesTable.insert.mock.calls.find(
         ([row]: any[]) =>

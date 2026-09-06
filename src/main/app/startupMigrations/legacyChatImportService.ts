@@ -549,21 +549,7 @@ export class LegacyChatImportService {
             this.pickNumber(row, ['created_at']) ??
             Date.now()
 
-          this.sessionDatabase.deepchatMessagesTable.insert({
-            id: messageId,
-            sessionId,
-            orderSeq: nextOrderSeq,
-            role: role as 'user' | 'assistant',
-            content: normalizedContent,
-            status,
-            isContextEdge: this.pickNumber(selectedVariant, ['is_context_edge']) === 1 ? 1 : 0,
-            metadata: this.normalizeMetadata(
-              this.pickString(selectedVariant, ['metadata']) || '{}'
-            ),
-            createdAt,
-            updatedAt: createdAt
-          })
-          this.messageStore.backfillMessageRow({
+          this.messageStore.importMessageRow({
             id: messageId,
             session_id: sessionId,
             order_seq: nextOrderSeq,

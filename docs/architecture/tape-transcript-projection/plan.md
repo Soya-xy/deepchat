@@ -27,27 +27,25 @@ Completion: the warning exists and fires only on divergence. No behavior change 
 
 Completion: one mapping per direction; the canonical form is pinned to the tables' behavior.
 
-## Slice 2b: The applier as the single terminal writer
+## Slice 2b + 3: Fact-first terminal writes through one applier
 
-- [ ] Add `TranscriptProjectionApplier` (`transcriptProjection.ts`) with `applyRecord` and
-      `applyRetraction`; move the table-writing bodies of the terminal methods into it.
-- [ ] Route every terminal method in `SessionTranscript` through the applier while keeping the
-      current order (tables, read back, fact). Behavior is unchanged in this slice.
+Landed as one commit: routing the terminal writes through the applier while keeping the old order
+would have meant a temporary read-back path and a second rewrite of every table double.
 
-Completion: `SessionTranscript` no longer writes terminal rows directly; all existing tests pass.
-
-## Slice 3: Fact-first terminal writes
-
-- [ ] Reorder every method in the spec's write-direction table: canonical record in memory, fact
-      append, `applyRecord`/`applyRetraction`. Remove `appendLiveTapeFacts`.
-- [ ] Fork: `cloneSentMessagesToSession` appends `message/<role>` facts with `meta.source = 'fork'`
-      before applying.
-- [ ] `recoverPendingMessages` and legacy import `backfillMessageRow` append their facts before
-      applying; the table-level `deepchatMessages.recoverPendingMessages` is removed if unused.
-- [ ] `prepareRetryMessage` restores the prompt through a replacement fact
-      (`reason: 'retry_restored_prompt'`) instead of `updateMessageStatus`.
-- [ ] Acceptance test: after each terminal write, `getMessage(id)` deep-equals the latest effective
-      fact record (except `traceCount`); fork/recover/import/retry leave no fact-less row.
+- [x] `TranscriptProjectionApplier` (`transcriptProjection.ts`) with `applyRecord` and
+      `applyRetractions`; the table-writing bodies, search document and usage-stats writes live
+      there. `deepchat_messages` gains `upsert` and `deleteByIds`.
+- [x] Every method in the spec's write-direction table builds the canonical record in memory,
+      appends its fact, then applies it. `appendLiveTapeFacts` and the read-back are gone.
+- [x] Fork appends a live `message/<role>` fact per copied row in one transaction;
+      `recoverPendingMessages` appends a revision fact per recovered row, one transaction each;
+      legacy import calls `importMessageRow`, which replaces the importer's direct insert.
+- [x] `restoreUserMessage` replaces the retry path's `updateMessageStatus('sent')`;
+      `updateMessageStatus` accepts only `'pending'`.
+- [x] Compaction shift keeps its single `incrementOrderSeqFrom` UPDATE, now stamped with the same
+      `updatedAt` the order replacement facts carry; range deletes keep their table-level statement.
+- [x] Tests: the transcript double returns appended rows; assertions follow `upsert`; fork,
+      retry-restore and import pin fact and row from the same record.
 
 Completion: no transcript terminal write happens without its fact in the same transaction.
 

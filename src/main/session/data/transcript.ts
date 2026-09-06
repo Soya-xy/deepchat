@@ -18,32 +18,25 @@ import type { DeepChatAssistantBlockRow } from '@/session/data/tables/deepchatAs
 import type { DeepChatUserMessageFileRow } from '@/session/data/tables/deepchatUserMessageFiles'
 import type { DeepChatUserMessageLinkRow } from '@/session/data/tables/deepchatUserMessageLinks'
 import type { DeepChatUserMessageRow } from '@/session/data/tables/deepchatUserMessages'
-import {
-  buildCompactionUsageStatsRecord,
-  buildUsageStatsRecord,
-  parseMessageMetadata,
-  resolveUsageModelId,
-  resolveUsageProviderId
-} from '@/session/usageStats'
+import { buildCompactionUsageStatsRecord, parseMessageMetadata } from '@/session/usageStats'
 import type {
   ExecutionJournalAuditReader,
   TapeAnchorReader,
   TapeCompactionModelCallWriter,
   TapeMessageFactWriter
 } from '@/tape/ports/capabilities'
+import type { TapeMessageReplacementOptions } from '@/tape/domain/facts'
 import type { TapeCompactionModelCallInput } from '@/tape/domain/compactionUsage'
-import { getAttachmentSearchableText } from '@shared/utils/attachmentRepresentation'
 import {
   assembleUserContent,
+  canonicalizeMessageContent,
   parseAssistantBlocks,
   parseUserContent,
   toAssistantBlock,
-  toMessageFile,
-  toUserMessageFileRowInput
+  toMessageFile
 } from './messageContent'
+import { persistMessageUsageStats, TranscriptProjectionApplier } from './transcriptProjection'
 
-const MAX_SEARCHABLE_ATTACHMENT_CHARACTERS = 32_000
-const SEARCH_ATTACHMENT_TRUNCATION_MARKER = '[Attachment search text truncated]'
 const COMPACTION_SHIFT_MATERIALIZATION_BATCH_SIZE = 500
 const MAX_COMPACTION_ATTEMPT_ID_CHARACTERS = 128
 
@@ -122,84 +115,11 @@ type StructuredMessageMaps = {
   assistantRows: Map<string, DeepChatAssistantBlockRow[]>
 }
 
-function extractSearchableMessageContent(rawContent: string): string {
-  try {
-    const parsed = JSON.parse(rawContent) as
-      | UserMessageContent
-      | Array<{
-          type?: string
-          content?: string
-          text?: string
-          error?: string
-        }>
-
-    if (Array.isArray(parsed)) {
-      const segments = parsed
-        .flatMap((block) => {
-          if (!block || typeof block !== 'object') {
-            return []
-          }
-
-          const values = [block.content, block.text, block.error]
-          return values.filter(
-            (value): value is string => typeof value === 'string' && value.trim().length > 0
-          )
-        })
-        .map((value) => value.trim())
-
-      if (segments.length > 0) {
-        return segments.join('\n')
-      }
-    } else if (parsed && typeof parsed === 'object') {
-      const segments: string[] = []
-      if (typeof parsed.text === 'string' && parsed.text.trim()) {
-        segments.push(parsed.text.trim())
-      }
-      const searchableAttachmentText = buildSearchableAttachmentText(parsed.files)
-      if (searchableAttachmentText) segments.push(searchableAttachmentText)
-      return segments.join('\n')
-    }
-  } catch {
-    // Plain-text fallback.
-  }
-
-  return rawContent.trim()
-}
-
-function buildSearchableAttachmentText(files: unknown): string {
-  if (!Array.isArray(files)) return ''
-  const text = files
-    .flatMap((file) => {
-      const searchableText = getAttachmentSearchableText(file).trim()
-      return searchableText ? [searchableText] : []
-    })
-    .join('\n')
-  if (text.length <= MAX_SEARCHABLE_ATTACHMENT_CHARACTERS) return text
-
-  const marker = `\n${SEARCH_ATTACHMENT_TRUNCATION_MARKER}\n`
-  const retainedCharacters = Math.max(
-    0,
-    Math.floor((MAX_SEARCHABLE_ATTACHMENT_CHARACTERS - marker.length) / 2)
-  )
-  let headEnd = retainedCharacters
-  if (isHighSurrogate(text.charCodeAt(headEnd - 1))) headEnd -= 1
-  let tailStart = text.length - retainedCharacters
-  if (isLowSurrogate(text.charCodeAt(tailStart))) tailStart += 1
-  return `${text.slice(0, headEnd).trimEnd()}${marker}${text.slice(tailStart).trimStart()}`
-}
-
-function isHighSurrogate(code: number): boolean {
-  return code >= 0xd800 && code <= 0xdbff
-}
-
-function isLowSurrogate(code: number): boolean {
-  return code >= 0xdc00 && code <= 0xdfff
-}
-
 export class SessionTranscript {
   private database: SessionDatabase
   private readonly tapeFacts: TapeMessageFactWriter
   private readonly compactionUsage: TapeCompactionModelCallWriter
+  private readonly projection: TranscriptProjectionApplier
 
   constructor(
     database: SessionDatabase,
@@ -216,6 +136,7 @@ export class SessionTranscript {
     this.database = database
     this.tapeFacts = tapeFacts
     this.compactionUsage = tapeFacts
+    this.projection = new TranscriptProjectionApplier(database)
   }
 
   private runInDatabaseTransaction<T>(operation: () => T): T {
@@ -232,21 +153,20 @@ export class SessionTranscript {
     }
   ): string {
     const id = nanoid()
-    const serializedContent = JSON.stringify(content)
-    this.runInDatabaseTransaction(() => {
-      this.database.deepchatMessagesTable.insert({
-        id,
-        sessionId,
-        orderSeq,
-        role: 'user',
-        content: serializedContent,
-        status: options?.status ?? 'sent',
-        ...(options?.metadata ? { metadata: JSON.stringify(options.metadata) } : {})
-      })
-      this.persistUserContent(id, content)
-      this.upsertMessageSearchDocument(sessionId, id, 'user', serializedContent)
-      this.appendLiveTapeFacts(id)
+    const now = Date.now()
+    const record = this.terminalRecord({
+      id,
+      sessionId,
+      orderSeq,
+      role: 'user',
+      content: JSON.stringify(content),
+      status: options?.status ?? 'sent',
+      isContextEdge: 0,
+      metadata: options?.metadata ? JSON.stringify(options.metadata) : '{}',
+      createdAt: now,
+      updatedAt: now
     })
+    this.runInDatabaseTransaction(() => this.commitRecord(record))
     return id
   }
 
@@ -271,23 +191,28 @@ export class SessionTranscript {
     options: CompactionMessageOptions
   ): string {
     const id = nanoid()
-    this.database.deepchatMessagesTable.insert({
-      id,
-      sessionId,
-      orderSeq,
-      role: 'assistant',
-      content: JSON.stringify(this.buildCompactionBlocks(status)),
-      status: 'sent',
-      metadata: JSON.stringify(
-        this.buildCompactionMetadata(
-          status,
-          summaryUpdatedAt,
-          options.compactionAttemptId,
-          options.boundaryReason
-        )
-      )
-    })
-    this.appendLiveTapeFacts(id)
+    const now = Date.now()
+    this.commitRecord(
+      this.terminalRecord({
+        id,
+        sessionId,
+        orderSeq,
+        role: 'assistant',
+        content: JSON.stringify(this.buildCompactionBlocks(status)),
+        status: 'sent',
+        isContextEdge: 0,
+        metadata: JSON.stringify(
+          this.buildCompactionMetadata(
+            status,
+            summaryUpdatedAt,
+            options.compactionAttemptId,
+            options.boundaryReason
+          )
+        ),
+        createdAt: now,
+        updatedAt: now
+      })
+    )
     return id
   }
 
@@ -313,12 +238,7 @@ export class SessionTranscript {
     let messageId = ''
     this.runInDatabaseTransaction(() => {
       if (options?.shiftExistingMessages) {
-        const shiftedMessageIds = this.database.deepchatMessagesTable.getIdsFromOrderSeq(
-          sessionId,
-          orderSeq
-        )
-        this.database.deepchatMessagesTable.incrementOrderSeqFrom(sessionId, orderSeq)
-        this.appendCompactionOrderShiftFacts(sessionId, shiftedMessageIds)
+        this.shiftMessagesFrom(sessionId, orderSeq)
       }
       messageId = this.insertCompactionMessageRecord(
         sessionId,
@@ -331,9 +251,17 @@ export class SessionTranscript {
     return messageId
   }
 
-  private appendCompactionOrderShiftFacts(sessionId: string, messageIds: string[]): void {
-    if (messageIds.length === 0) return
-
+  /**
+   * Compaction inserts its marker in front of the messages it summarised. The shifted rows keep
+   * their content; each records its new position as an order replacement fact, and the table moves
+   * them in one statement stamped with the same time the facts carry.
+   */
+  private shiftMessagesFrom(sessionId: string, fromOrderSeq: number): void {
+    const shiftedAt = Date.now()
+    const messageIds = this.database.deepchatMessagesTable.getIdsFromOrderSeq(
+      sessionId,
+      fromOrderSeq
+    )
     const shiftedRecords: ChatMessageRecord[] = []
     for (
       let offset = 0;
@@ -351,11 +279,12 @@ export class SessionTranscript {
       throw new Error('Failed to materialize every message shifted by compaction.')
     }
     for (const record of shiftedRecords) {
-      this.tapeFacts.appendMessageReplacement(record, {
-        reason: 'compaction_order_shifted',
-        revisionKind: 'order'
-      })
+      this.tapeFacts.appendMessageReplacement(
+        { ...record, orderSeq: record.orderSeq + 1, updatedAt: shiftedAt },
+        { reason: 'compaction_order_shifted', revisionKind: 'order' }
+      )
     }
+    this.database.deepchatMessagesTable.incrementOrderSeqFrom(sessionId, fromOrderSeq, shiftedAt)
   }
 
   updateAssistantContent(
@@ -372,10 +301,18 @@ export class SessionTranscript {
 
   updateAssistantMetadata(messageId: string, metadata: string): void {
     this.database.deepchatMessagesTable.updateMetadata(messageId, metadata)
-    this.persistUsageStats(messageId, metadata, 'live')
+    const row = this.database.deepchatMessagesTable.get(messageId)
+    if (row?.role === 'assistant') {
+      persistMessageUsageStats(this.database, { ...this.recordFromRow(row), metadata })
+    }
   }
 
-  updateMessageStatus(messageId: string, status: 'pending' | 'sent' | 'error'): void {
+  /**
+   * Only the pending region is written in place. Terminal status arrives through a fact-backed
+   * method (`finalizeAssistantMessage`, `setMessageError`, `settleSteerMessages`,
+   * `restoreUserMessage`), never by flipping the column.
+   */
+  updateMessageStatus(messageId: string, status: 'pending'): void {
     this.database.deepchatMessagesTable.updateStatus(messageId, status)
   }
 
@@ -389,24 +326,20 @@ export class SessionTranscript {
       if (metadata.inputReceipt?.mode !== 'steer' || metadata.inputReceipt.readAt !== null) {
         throw new Error(`Message ${messageId} is not an unread steer message.`)
       }
-      this.database.deepchatMessagesTable.updateMetadata(
-        messageId,
-        JSON.stringify({
-          ...metadata,
-          inputReceipt: {
-            mode: 'steer',
-            readAt
-          }
-        } satisfies MessageMetadata)
+      this.commitReplacement(
+        {
+          ...message,
+          metadata: JSON.stringify({
+            ...metadata,
+            inputReceipt: {
+              mode: 'steer',
+              readAt
+            }
+          } satisfies MessageMetadata),
+          updatedAt: Date.now()
+        },
+        { reason: 'steer_message_read', revisionKind: 'record' }
       )
-      const updated = this.getMessage(messageId)
-      if (!updated) {
-        throw new Error(`Failed to mark steer message read: ${messageId}`)
-      }
-      this.tapeFacts.appendMessageReplacement(updated, {
-        reason: 'steer_message_read',
-        revisionKind: 'record'
-      })
     }
     return messageIds.map((messageId) => this.requireMessage(messageId))
   }
@@ -417,12 +350,10 @@ export class SessionTranscript {
       if (!message || message.role !== 'user' || message.status !== 'pending') {
         throw new Error(`Pending steer message not found: ${messageId}`)
       }
-      this.database.deepchatMessagesTable.updateStatus(messageId, 'sent')
-      const updated = this.requireMessage(messageId)
-      this.tapeFacts.appendMessageReplacement(updated, {
-        reason: 'steer_message_settled',
-        revisionKind: 'record'
-      })
+      this.commitReplacement(
+        { ...message, status: 'sent', updatedAt: Date.now() },
+        { reason: 'steer_message_settled', revisionKind: 'record' }
+      )
     }
     return messageIds.map((messageId) => this.requireMessage(messageId))
   }
@@ -437,14 +368,29 @@ export class SessionTranscript {
       if (metadata.inputReceipt?.mode !== 'steer' || metadata.inputReceipt.readAt !== null) {
         throw new Error(`Message ${messageId} is not an unread steer message.`)
       }
-      this.database.deepchatMessagesTable.updateStatus(messageId, 'error')
-      const updated = this.requireMessage(messageId)
-      this.tapeFacts.appendMessageReplacement(updated, {
-        reason: 'steer_message_restart_failed',
-        revisionKind: 'record'
-      })
+      this.commitReplacement(
+        { ...message, status: 'error', updatedAt: Date.now() },
+        { reason: 'steer_message_restart_failed', revisionKind: 'record' }
+      )
     }
     return messageIds.map((messageId) => this.requireMessage(messageId))
+  }
+
+  /**
+   * A retried prompt whose row had failed (for example a Steer prompt that could not restart) is
+   * kept and re-sent, so it must count as sent again for context history.
+   */
+  restoreUserMessage(messageId: string): void {
+    this.runInDatabaseTransaction(() => {
+      const message = this.getMessage(messageId)
+      if (!message || message.role !== 'user' || message.status === 'sent') {
+        return
+      }
+      this.commitReplacement(
+        { ...message, status: 'sent', updatedAt: Date.now() },
+        { reason: 'retry_restored_prompt', revisionKind: 'record' }
+      )
+    })
   }
 
   finalizeAssistantMessage(
@@ -453,16 +399,18 @@ export class SessionTranscript {
     metadata: string
   ): void {
     this.runInDatabaseTransaction(() => {
-      this.database.deepchatAssistantBlocksTable.replaceForMessage(messageId, blocks)
-      this.database.deepchatMessagesTable.updateContentAndStatus(
-        messageId,
-        JSON.stringify(blocks),
-        'sent',
-        metadata
+      const row = this.database.deepchatMessagesTable.get(messageId)
+      if (!row) return
+      this.commitRecord(
+        this.terminalRecord({
+          ...this.recordFromRow(row),
+          role: 'assistant',
+          content: JSON.stringify(blocks),
+          status: 'sent',
+          metadata,
+          updatedAt: Date.now()
+        })
       )
-      this.upsertAssistantSearchDocument(messageId, blocks)
-      this.persistUsageStats(messageId, metadata, 'live')
-      this.appendLiveTapeFacts(messageId)
     })
   }
 
@@ -473,20 +421,25 @@ export class SessionTranscript {
     options: CompactionMessageOptions
   ): void {
     this.runInDatabaseTransaction(() => {
-      this.database.deepchatMessagesTable.updateContentAndStatus(
-        messageId,
-        JSON.stringify(this.buildCompactionBlocks(status)),
-        'sent',
-        JSON.stringify(
-          this.buildCompactionMetadata(
-            status,
-            summaryUpdatedAt,
-            options.compactionAttemptId,
-            options.boundaryReason
-          )
-        )
+      const row = this.database.deepchatMessagesTable.get(messageId)
+      if (!row) return
+      this.commitRecord(
+        this.terminalRecord({
+          ...this.recordFromRow(row),
+          role: 'assistant',
+          content: JSON.stringify(this.buildCompactionBlocks(status)),
+          status: 'sent',
+          metadata: JSON.stringify(
+            this.buildCompactionMetadata(
+              status,
+              summaryUpdatedAt,
+              options.compactionAttemptId,
+              options.boundaryReason
+            )
+          ),
+          updatedAt: Date.now()
+        })
       )
-      this.appendLiveTapeFacts(messageId)
     })
   }
 
@@ -505,27 +458,18 @@ export class SessionTranscript {
 
   setMessageError(messageId: string, blocks: AssistantMessageBlock[], metadata?: string): void {
     this.runInDatabaseTransaction(() => {
-      this.database.deepchatAssistantBlocksTable.replaceForMessage(messageId, blocks)
-      const serializedBlocks = JSON.stringify(blocks)
-      if (metadata === undefined) {
-        this.database.deepchatMessagesTable.updateContentAndStatus(
-          messageId,
-          serializedBlocks,
-          'error'
-        )
-        this.upsertAssistantSearchDocument(messageId, blocks)
-        this.appendLiveTapeFacts(messageId)
-        return
-      }
-      this.database.deepchatMessagesTable.updateContentAndStatus(
-        messageId,
-        serializedBlocks,
-        'error',
-        metadata
+      const row = this.database.deepchatMessagesTable.get(messageId)
+      if (!row) return
+      this.commitRecord(
+        this.terminalRecord({
+          ...this.recordFromRow(row),
+          role: 'assistant',
+          content: JSON.stringify(blocks),
+          status: 'error',
+          metadata: metadata ?? row.metadata,
+          updatedAt: Date.now()
+        })
       )
-      this.upsertAssistantSearchDocument(messageId, blocks)
-      this.persistUsageStats(messageId, metadata, 'live')
-      this.appendLiveTapeFacts(messageId)
     })
   }
 
@@ -629,46 +573,14 @@ export class SessionTranscript {
   }
 
   private applyMessageContentUpdate(messageId: string, content: string): void {
-    this.database.deepchatMessagesTable.updateContent(messageId, content)
     const row = this.database.deepchatMessagesTable.get(messageId)
     if (!row) {
       return
     }
-
-    if (row.role === 'user') {
-      const parsed = parseUserContent(content)
-      if (parsed) {
-        this.persistUserContent(messageId, parsed)
-        this.upsertMessageSearchDocument(row.session_id, messageId, 'user', content, row.updated_at)
-      }
-      const updated = this.getMessage(messageId)
-      if (updated) {
-        this.tapeFacts.appendMessageReplacement(updated, {
-          reason: 'message_content_updated',
-          revisionKind: 'record'
-        })
-      }
-      return
-    }
-
-    const blocks = parseAssistantBlocks(content)
-    this.database.deepchatAssistantBlocksTable.replaceForMessage(messageId, blocks)
-    if (row.status === 'sent' || row.status === 'error') {
-      this.upsertMessageSearchDocument(
-        row.session_id,
-        messageId,
-        'assistant',
-        content,
-        row.updated_at
-      )
-    }
-    const updated = this.getMessage(messageId)
-    if (updated) {
-      this.tapeFacts.appendMessageReplacement(updated, {
-        reason: 'message_content_updated',
-        revisionKind: 'record'
-      })
-    }
+    this.commitReplacement(
+      this.terminalRecord({ ...this.recordFromRow(row), content, updatedAt: Date.now() }),
+      { reason: 'message_content_updated', revisionKind: 'record' }
+    )
   }
 
   getNextOrderSeq(sessionId: string): number {
@@ -693,17 +605,7 @@ export class SessionTranscript {
   private deleteMessageWithReason(messageId: string, reason: string): void {
     this.runInDatabaseTransaction(() => {
       const record = this.getMessage(messageId)
-      if (record) {
-        this.tapeFacts.appendMessageRetraction(record, reason)
-      }
-      this.database.deepchatSearchDocumentsTable.delete(`message:${messageId}`)
-      this.database.deepchatAssistantBlocksTable.delete(messageId)
-      this.database.deepchatUserMessageLinksTable.delete(messageId)
-      this.database.deepchatUserMessageFilesTable.delete(messageId)
-      this.database.deepchatUserMessagesTable.delete(messageId)
-      this.database.deepchatMessageTracesTable.deleteByMessageIds([messageId])
-      this.database.deepchatMessageSearchResultsTable.deleteByMessageIds([messageId])
-      this.database.deepchatMessagesTable.delete(messageId)
+      this.commitRetractions(record ? [record] : [], reason, [messageId])
     })
   }
 
@@ -712,19 +614,13 @@ export class SessionTranscript {
       const records = this.getMessages(sessionId).filter(
         (record) => record.orderSeq >= fromOrderSeq
       )
-      for (const record of records) {
-        this.tapeFacts.appendMessageRetraction(record, 'messages_deleted_from_order_seq')
-      }
-      const messageIds = records.map((record) => record.id)
-      if (messageIds.length > 0) {
-        this.database.deepchatSearchDocumentsTable.deleteByMessageIds(messageIds)
-        this.database.deepchatAssistantBlocksTable.deleteByMessageIds(messageIds)
-        this.database.deepchatUserMessageLinksTable.deleteByMessageIds(messageIds)
-        this.database.deepchatUserMessageFilesTable.deleteByMessageIds(messageIds)
-        this.database.deepchatUserMessagesTable.deleteByMessageIds(messageIds)
-        this.database.deepchatMessageTracesTable.deleteByMessageIds(messageIds)
-        this.database.deepchatMessageSearchResultsTable.deleteByMessageIds(messageIds)
-      }
+      this.commitRetractions(
+        records,
+        'messages_deleted_from_order_seq',
+        records.map((record) => record.id)
+      )
+      // The range delete is the table-level guarantee this method has always given: no row of the
+      // Session at or past `fromOrderSeq` survives, whatever the read above surfaced.
       this.database.deepchatMessagesTable.deleteFromOrderSeq(sessionId, fromOrderSeq)
     })
   }
@@ -846,40 +742,25 @@ export class SessionTranscript {
           row.status === 'sent' && parseMessageMetadata(row.metadata).messageType !== 'compaction'
       )
     const sourceRecords = this.toRecords(sourceRows)
+    const forkedAt = Date.now()
 
-    let nextOrderSeq = 1
-    for (const record of sourceRecords) {
-      const nextId = nanoid()
-      this.database.deepchatMessagesTable.insert({
-        id: nextId,
-        sessionId: targetSessionId,
-        orderSeq: nextOrderSeq,
-        role: record.role,
-        content: record.content,
-        status: 'sent',
-        isContextEdge: record.isContextEdge,
-        metadata: record.metadata
-      })
-      if (record.role === 'user') {
-        const userContent = parseUserContent(record.content)
-        if (userContent) {
-          this.persistUserContent(nextId, userContent)
-        }
-      } else {
-        this.database.deepchatAssistantBlocksTable.replaceForMessage(
-          nextId,
-          parseAssistantBlocks(record.content)
+    this.runInDatabaseTransaction(() => {
+      let nextOrderSeq = 1
+      for (const record of sourceRecords) {
+        this.commitRecord(
+          this.terminalRecord({
+            ...record,
+            id: nanoid(),
+            sessionId: targetSessionId,
+            orderSeq: nextOrderSeq,
+            status: 'sent',
+            createdAt: forkedAt,
+            updatedAt: forkedAt
+          })
         )
+        nextOrderSeq += 1
       }
-      this.upsertMessageSearchDocument(
-        targetSessionId,
-        nextId,
-        record.role,
-        record.content,
-        record.updatedAt
-      )
-      nextOrderSeq += 1
-    }
+    })
 
     return sourceRecords.length
   }
@@ -888,27 +769,30 @@ export class SessionTranscript {
     forceRecoverMessagesBySession?: ReadonlyMap<string, ReadonlySet<string>>
   }): number {
     const pendingRows = this.database.deepchatMessagesTable.getByStatus('pending')
-    const recoveredRecords = new Map(
-      this.toRecords(pendingRows).map((record) => [record.id, record])
-    )
+    const pendingRecords = new Map(this.toRecords(pendingRows).map((record) => [record.id, record]))
     let recoveredCount = 0
     for (const row of pendingRows) {
       const forceRecovery = options?.forceRecoverMessagesBySession?.get(row.session_id)?.has(row.id)
       if (!forceRecovery && this.shouldKeepPending(row)) {
         continue
       }
-      if (row.role === 'assistant') {
-        const blocks = parseAssistantBlocks(recoveredRecords.get(row.id)?.content ?? row.content)
-        const recoveredBlocks = buildTerminalErrorBlocks(blocks, 'common.error.sessionInterrupted')
-        this.database.deepchatAssistantBlocksTable.replaceForMessage(row.id, recoveredBlocks)
-        this.database.deepchatMessagesTable.updateContentAndStatus(
-          row.id,
-          JSON.stringify(recoveredBlocks),
-          'error'
+      const record = pendingRecords.get(row.id) ?? this.recordFromRow(row)
+      const content =
+        row.role === 'assistant'
+          ? JSON.stringify(
+              buildTerminalErrorBlocks(
+                parseAssistantBlocks(record.content),
+                'common.error.sessionInterrupted'
+              )
+            )
+          : record.content
+      // One transaction per message, as the row updates were before: a message that cannot be
+      // recovered does not undo the ones already settled.
+      this.runInDatabaseTransaction(() =>
+        this.commitRecord(
+          this.terminalRecord({ ...record, content, status: 'error', updatedAt: Date.now() })
         )
-      } else {
-        this.database.deepchatMessagesTable.updateStatus(row.id, 'error')
-      }
+      )
       recoveredCount += 1
     }
     return recoveredCount
@@ -962,28 +846,9 @@ export class SessionTranscript {
     return { compacted, retracted, failed }
   }
 
-  backfillMessageRow(row: DeepChatMessageRow): void {
-    if (row.role === 'user') {
-      const content = parseUserContent(row.content)
-      if (content) {
-        this.persistUserContent(row.id, content)
-      }
-    } else {
-      this.database.deepchatAssistantBlocksTable.replaceForMessage(
-        row.id,
-        parseAssistantBlocks(row.content)
-      )
-    }
-
-    if (row.status === 'sent' || row.status === 'error') {
-      this.upsertMessageSearchDocument(
-        row.session_id,
-        row.id,
-        row.role,
-        this.materializeContent(row),
-        row.updated_at
-      )
-    }
+  /** Legacy chat import: the row becomes a message fact and its transcript projection. */
+  importMessageRow(row: DeepChatMessageRow): void {
+    this.commitRecord(this.terminalRecord(this.recordFromRow(row)))
   }
 
   private shouldKeepPending(row: DeepChatMessageRow): boolean {
@@ -1001,12 +866,58 @@ export class SessionTranscript {
     )
   }
 
-  private appendLiveTapeFacts(messageId: string): void {
-    const record = this.getMessage(messageId)
-    if (!record) {
-      return
-    }
+  /**
+   * Terminal state is written fact-first: the record is appended to Tape, then the transcript
+   * tables are derived from that same record. Both happen inside the caller's transaction, so a
+   * failed append leaves no transcript row behind and a committed row always has its fact.
+   */
+  private commitRecord(record: ChatMessageRecord): void {
     this.tapeFacts.appendMessageRecord(record)
+    this.projection.applyRecord(record)
+  }
+
+  private commitReplacement(
+    record: ChatMessageRecord,
+    options: TapeMessageReplacementOptions
+  ): void {
+    this.tapeFacts.appendMessageReplacement(record, options)
+    this.projection.applyRecord(record)
+  }
+
+  private commitRetractions(
+    records: ChatMessageRecord[],
+    reason: string,
+    messageIds: string[]
+  ): void {
+    for (const record of records) {
+      this.tapeFacts.appendMessageRetraction(record, reason)
+    }
+    this.projection.applyRetractions(messageIds)
+  }
+
+  /** The record a fact carries: content in the form the tables will hand back after the write. */
+  private terminalRecord(record: ChatMessageRecord): ChatMessageRecord {
+    return {
+      ...record,
+      content: canonicalizeMessageContent(record.role, record.content, record.updatedAt),
+      traceCount: 0
+    }
+  }
+
+  private recordFromRow(row: DeepChatMessageRow): ChatMessageRecord {
+    return {
+      id: row.id,
+      sessionId: row.session_id,
+      orderSeq: row.order_seq,
+      role: row.role,
+      content: row.content,
+      status: row.status,
+      isContextEdge: row.is_context_edge,
+      metadata: row.metadata,
+      traceCount: 0,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at
+    }
   }
 
   private toRecord(row: DeepChatMessageRow): ChatMessageRecord {
@@ -1100,20 +1011,6 @@ export class SessionTranscript {
     }
   }
 
-  private persistUserContent(messageId: string, content: UserMessageContent): void {
-    this.database.deepchatUserMessagesTable.upsert({
-      messageId,
-      text: content.text,
-      searchEnabled: content.search === true,
-      thinkEnabled: content.think === true
-    })
-    this.database.deepchatUserMessageFilesTable.replaceForMessage(
-      messageId,
-      content.files.map((file) => toUserMessageFileRowInput(file))
-    )
-    this.database.deepchatUserMessageLinksTable.replaceForMessage(messageId, content.links)
-  }
-
   private loadStructuredMaps(messageIds: string[]): StructuredMessageMaps {
     const userRows = this.database.deepchatUserMessagesTable.listByMessageIds(messageIds)
     const fileRows = this.database.deepchatUserMessageFilesTable.listByMessageIds(messageIds)
@@ -1139,87 +1036,5 @@ export class SessionTranscript {
       }
     }
     return grouped
-  }
-
-  private upsertAssistantSearchDocument(messageId: string, blocks: AssistantMessageBlock[]): void {
-    const messageRow = this.database.deepchatMessagesTable.get(messageId)
-    if (!messageRow) {
-      return
-    }
-
-    this.upsertMessageSearchDocument(
-      messageRow.session_id,
-      messageId,
-      'assistant',
-      JSON.stringify(blocks),
-      messageRow.updated_at
-    )
-  }
-
-  private upsertMessageSearchDocument(
-    sessionId: string,
-    messageId: string,
-    role: 'user' | 'assistant',
-    rawContent: string,
-    updatedAt: number = Date.now()
-  ): void {
-    const sessionTitle = this.database.newSessionsTable.get(sessionId)?.title ?? ''
-    this.database.deepchatSearchDocumentsTable.upsert({
-      documentKey: `message:${messageId}`,
-      sessionId,
-      messageId,
-      documentKind: 'message',
-      role,
-      title: sessionTitle,
-      content: extractSearchableMessageContent(rawContent),
-      updatedAt
-    })
-  }
-
-  private persistUsageStats(
-    messageId: string,
-    metadataRaw: string,
-    source: 'backfill' | 'live'
-  ): void {
-    const usageStatsTable = this.database.deepchatUsageStatsTable
-    const messageRow = this.database.deepchatMessagesTable.get(messageId)
-    if (!messageRow || messageRow.role !== 'assistant') {
-      return
-    }
-
-    try {
-      const metadata = parseMessageMetadata(metadataRaw)
-      if (metadata.messageType === 'compaction') {
-        return
-      }
-
-      const sessionRow = this.database.deepchatSessionsTable.get(messageRow.session_id)
-      const providerId = resolveUsageProviderId(metadata, sessionRow?.provider_id)
-      const modelId = resolveUsageModelId(metadata, sessionRow?.model_id)
-
-      if (!providerId || !modelId) {
-        return
-      }
-
-      const usageRecord = buildUsageStatsRecord({
-        messageId: messageRow.id,
-        sessionId: messageRow.session_id,
-        createdAt: messageRow.created_at,
-        updatedAt: messageRow.updated_at,
-        providerId,
-        modelId,
-        metadata,
-        source
-      })
-
-      if (!usageRecord) {
-        return
-      }
-
-      usageStatsTable.upsert(usageRecord)
-    } catch (error) {
-      logger.error('Failed to persist deepchat usage stats', { messageId, source }, error)
-      return
-    }
   }
 }

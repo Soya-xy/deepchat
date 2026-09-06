@@ -86,6 +86,39 @@ function createProjectionHarness() {
           .map((message) => message.order_seq)
       )
     ),
+    upsert: vi.fn(
+      (input: {
+        id: string
+        sessionId: string
+        orderSeq: number
+        role: 'user' | 'assistant'
+        content: string
+        status: 'pending' | 'sent' | 'error'
+        isContextEdge: number
+        metadata: string
+        createdAt: number
+        updatedAt: number
+      }) => {
+        const existing = messages.get(input.id)
+        const row = {
+          id: input.id,
+          session_id: input.sessionId,
+          order_seq: input.orderSeq,
+          role: input.role,
+          content: input.content,
+          status: input.status,
+          is_context_edge: input.isContextEdge,
+          metadata: input.metadata,
+          trace_count: existing?.trace_count ?? 0,
+          created_at: input.createdAt,
+          updated_at: input.updatedAt
+        }
+        messages.set(input.id, existing ? Object.assign(existing, row) : row)
+      }
+    ),
+    deleteByIds: vi.fn((ids: string[]) => {
+      for (const id of ids) messages.delete(id)
+    }),
     updateStatus: vi.fn((id: string, status: MessageRow['status']) => {
       const message = messages.get(id)
       if (message) Object.assign(message, { status, updated_at: clock++ })

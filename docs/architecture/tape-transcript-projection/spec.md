@@ -121,19 +121,22 @@ fact append disappears.
 | `createUserMessage` | `appendMessageRecord` | `applyRecord` |
 | `finalizeAssistantMessage`, `setMessageError` | `appendMessageRecord` (pending shell becomes terminal) | `applyRecord` |
 | `insertCompactionMessageRecord`, `updateCompactionMessage` | `appendMessageRecord` (compaction indicator event) | `applyRecord` |
-| `appendCompactionOrderShiftFacts` | per-message `appendMessageReplacement('order')` | `applyRecord` per shifted record |
+| compaction shift (`shiftMessagesFrom`) | per-message `appendMessageReplacement('order')` | none: one `incrementOrderSeqFrom` UPDATE stamped with the facts' `updatedAt`; content is unchanged so re-materializing N rows would only add writes |
 | `markSteerMessagesRead`, `settleSteerMessages`, `failPendingSteerMessages` | `appendMessageReplacement('record')` | `applyRecord` |
 | `updateMessageContent` | `appendMessageReplacement('record')` | `applyRecord` |
 | `deleteMessageWithReason`, `deleteFromOrderSeq` | `appendMessageRetraction` | `applyRetraction` |
-| `prepareRetryMessage` status restore | `appendMessageReplacement('record', reason 'retry_restored_prompt')` | `applyRecord` |
-| `cloneSentMessagesToSession` (fork) | `appendMessageRecord` with `meta.source = 'fork'` | `applyRecord` |
+| `restoreUserMessage` (retry of a failed prompt, called from `prepareRetryMessage`) | `appendMessageReplacement('record', reason 'retry_restored_prompt')` | `applyRecord` |
+| `cloneSentMessagesToSession` (fork) | `appendMessageRecord` per copied row, in the fork Session's Tape | `applyRecord` |
 | `recoverPendingMessages` | `appendMessageRecord` (revision key, status `error`) | `applyRecord` |
-| legacy import `backfillMessageRow` | `appendMessageRecord` with source `backfill` | `applyRecord` |
+| legacy import `importMessageRow` | `appendMessageRecord` | `applyRecord` (replaces the importer's direct insert) |
 
-Fork does not introduce a `fork/*` fact name; `tape-system.md` records that Tape has no fork writer.
-The fork facts are ordinary `message/<role>` facts whose `meta.source` records their origin.
+Fork does not introduce a `fork/*` fact name or a new fact source; `tape-system.md` records that
+Tape has no fork writer. The copied rows are ordinary live `message/<role>` facts of the fork
+Session, created at fork time. Their origin is the fork Session's own metadata, not the fact.
 
-The steer methods keep relying on the caller's `runInTransaction`, as today.
+`updateMessageStatus` narrows to the pending region (`'pending'` only). The steer methods keep
+relying on the caller's `runInTransaction`, as today; `recoverPendingMessages` and fork run inside
+one transaction of their own.
 
 ### Projection cursor and readiness
 
@@ -186,10 +189,10 @@ import the applier.
 ## Compatibility
 
 - No Tape schema, fact name, provenance key, hash version or payload field changes. Records written
-  fact-first serialize to the same `payload.record` shape as records read back from the tables did.
+  fact-first serialize to the same `payload.record` shape as records read back from the tables did;
+  `traceCount` is `0`, which is what the live read-back reported as well.
 - Rollback is a code revert. The meta table is ignored by earlier code; the earlier reconciler's
-  backfill finds every fact already present through provenance keys and appends nothing. Fork facts
-  with `meta.source = 'fork'` read as ordinary message facts.
+  backfill finds every fact already present through provenance keys and appends nothing.
 - `SessionTranscript`'s public method signatures are unchanged. `TapeBackfillResult` is unchanged.
 - The order in which `deepchat_search_documents` and `deepchat_usage_stats` rows are written inside
   a terminal transaction changes; both are read only after commit.
